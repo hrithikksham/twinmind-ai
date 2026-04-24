@@ -50,42 +50,15 @@ export default function Page() {
   });
 
   return (
-    <div className="h-screen flex flex-col bg-[#dddffd] text-gray-900">
+    <div className="h-screen flex flex-col bg-[#dfdfdf] text-gray-900 ">
       
       {/* ─── Header ───────────────────────── */}
-      <header className="flex items-center justify-between px-6 py-3 backdrop-blur-md bg-white/70 border-b border-gray-200">
+      <header className="flex items-center justify-between px-6 py-3 backdrop-blur-md bg-white/100 border-b border-gray-200 rounded-xl shadow-lg overflow-hidden">
         
         {/* Title */}
         <h1 className="text-[28px] font-semibold tracking-tight">
           TwinMind
         </h1>
-
-        {/* Settings Button */}
-        <button
-          onClick={() => setIsSettingsOpen(true)}
-          className="w-9 h-9 flex items-center justify-center rounded-full hover:bg-gray-100 transition hover:scale-105"
-        >
-          {/* Minimal gear icon */}
-          <svg
-            xmlns="http://www.w3.org/2000/svg"
-            className="w-9 h-9 text-gray-700"
-            fill="none"
-            viewBox="0 0 14 24"
-            stroke="currentColor"
-            strokeWidth={1}
-          >
-            <path
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              d="M11.983 5.5a1.5 1.5 0 011.034.413l.634.634a1.5 1.5 0 001.06.44h.896a1.5 1.5 0 011.415 1.02l.308.924a1.5 1.5 0 00.364.586l.633.634a1.5 1.5 0 010 2.12l-.633.634a1.5 1.5 0 00-.364.586l-.308.924a1.5 1.5 0 01-1.415 1.02h-.896a1.5 1.5 0 00-1.06.44l-.634.634a1.5 1.5 0 01-2.12 0l-.634-.634a1.5 1.5 0 00-1.06-.44h-.896a1.5 1.5 0 01-1.415-1.02l-.308-.924a1.5 1.5 0 00-.364-.586l-.633-.634a1.5 1.5 0 010-2.12l.633-.634a1.5 1.5 0 00.364-.586l.308-.924A1.5 1.5 0 018.23 7.01h.896a1.5 1.5 0 001.06-.44l.634-.634a1.5 1.5 0 011.034-.413z"
-            />
-            <path
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              d="M12 15a3 3 0 100-6 3 3 0 000 6z"
-            />
-          </svg>
-        </button>
       </header>
 
       {/* ─── Main Layout ───────────────────── */}

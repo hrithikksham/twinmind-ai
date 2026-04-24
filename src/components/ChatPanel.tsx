@@ -62,7 +62,7 @@ export function ChatPanel({ messages, isLoading, onSendMessage }: ChatPanelProps
 
         <div className="
           flex items-end gap-2
-          bg-white/80 backdrop-blur-md
+          bg-white/100 backdrop-blur-md
           rounded-2xl px-3 py-2
           shadow-sm border border-gray-200
         ">

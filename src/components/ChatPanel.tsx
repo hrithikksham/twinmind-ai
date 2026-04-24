@@ -1,14 +1,14 @@
 /**
- * ChatPanel.tsx
- *
- * Right column. Chat history + input box.
- * Streams assistant tokens as they arrive — no full-message wait.
+ * ChatPanel.tsx 
+ * Right column. Shows the back-and-forth conversation with the assistant.
+ * Each message bubble may be from the user or the assistant, and may be streaming (in which case it shows a pulsing cursor).
+ * The input box at the bottom allows the user to type and send new messages, which are handled by the parent component.
+ * The panel automatically scrolls to the bottom when new messages arrive.
+ * The design emphasizes clarity and responsiveness, with distinct styles for user vs assistant messages and a clean input area.  
  */
 
 import React, { useEffect, useRef, useState } from 'react';
 import type { ChatMessage } from '../hooks/useChat';
-
-// ─── Props ────────────────────────────────────────────────────────────────────
 
 interface ChatPanelProps {
   messages: ChatMessage[];
@@ -16,13 +16,10 @@ interface ChatPanelProps {
   onSendMessage: (text: string) => void;
 }
 
-// ─── Component ────────────────────────────────────────────────────────────────
-
 export function ChatPanel({ messages, isLoading, onSendMessage }: ChatPanelProps) {
   const [input, setInput] = useState('');
   const bottomRef = useRef<HTMLDivElement>(null);
 
-  // Auto-scroll to bottom on every new token
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
@@ -42,133 +39,103 @@ export function ChatPanel({ messages, isLoading, onSendMessage }: ChatPanelProps
   };
 
   return (
-    <div style={styles.panel}>
-      {/* History */}
-      <div style={styles.history}>
+    <div className="flex flex-col h-full">
+
+      {/* ─── Chat History ───────────────────────── */}
+      <div className="flex-1 overflow-y-auto px-4 py-4 flex flex-col gap-3">
+
         {messages.length === 0 && (
-          <p style={styles.empty}>Click a suggestion or ask a question.</p>
+          <div className="text-sm text-gray-400 text-center mt-10">
+            Click a suggestion or ask something…
+          </div>
         )}
+
         {messages.map((msg) => (
           <MessageBubble key={msg.id} message={msg} />
         ))}
+
         <div ref={bottomRef} />
       </div>
 
-      {/* Input */}
-      <div style={styles.inputRow}>
-        <textarea
-          style={styles.textarea}
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={handleKeyDown}
-          placeholder="Ask a question…"
-          rows={2}
-          disabled={isLoading}
-        />
-        <button
-          style={{
-            ...styles.sendBtn,
-            opacity: isLoading || !input.trim() ? 0.45 : 1,
-            cursor: isLoading || !input.trim() ? 'default' : 'pointer',
-          }}
-          onClick={submit}
-          disabled={isLoading || !input.trim()}
-        >
-          Send
-        </button>
+      {/* ─── Input ─────────────────────────────── */}
+      <div className="px-4 pb-4 pt-2">
+
+        <div className="
+          flex items-end gap-2
+          bg-white/80 backdrop-blur-md
+          rounded-2xl px-3 py-2
+          shadow-sm border border-gray-200
+        ">
+
+          <textarea
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={handleKeyDown}
+            placeholder="Ask something…"
+            rows={1}
+            disabled={isLoading}
+            className="
+              flex-1 resize-none bg-transparent
+              text-sm text-gray-900
+              outline-none
+              placeholder:text-gray-400
+              leading-relaxed
+            "
+          />
+
+          <button
+            onClick={submit}
+            disabled={isLoading || !input.trim()}
+            className={`
+              text-sm font-medium px-3 py-1.5 rounded-lg
+              transition
+              ${
+                isLoading || !input.trim()
+                  ? 'text-gray-300 cursor-default'
+                  : 'text-blue-600 hover:bg-blue-50'
+              }
+            `}
+          >
+            Send
+          </button>
+
+        </div>
+
       </div>
     </div>
   );
 }
 
-// ─── MessageBubble ────────────────────────────────────────────────────────────
+// ─── Message Bubble ─────────────────────────────────
 
 function MessageBubble({ message }: { message: ChatMessage }) {
   const isUser = message.role === 'user';
 
   return (
     <div
-      style={{
-        ...styles.bubble,
-        alignSelf: isUser ? 'flex-end' : 'flex-start',
-        background: isUser ? '#1a73e8' : '#f3f4f6',
-        color: isUser ? '#fff' : '#111827',
-        borderRadius: isUser ? '12px 12px 2px 12px' : '12px 12px 12px 2px',
-      }}
+      className={`max-w-[75%] px-4 py-2.5 text-[14px] leading-relaxed rounded-2xl
+        ${
+          isUser
+            ? 'ml-auto bg-blue-600 text-white'
+            : 'mr-auto bg-gray-100 text-gray-900'
+        }
+      `}
     >
-      {message.content || (message.streaming ? <span style={styles.cursor}>▍</span> : null)}
-      {message.streaming && message.content && (
-        <span style={styles.cursor}>▍</span>
-      )}
+      {/* Content */}
+      {message.content || (message.streaming ? <Cursor /> : null)}
+
+      {/* Streaming cursor */}
+      {message.streaming && message.content && <Cursor />}
     </div>
   );
 }
 
-// ─── Styles ───────────────────────────────────────────────────────────────────
+// ─── Cursor (streaming feel) ───────────────────────
 
-const styles = {
-  panel: {
-    display: 'flex' as const,
-    flexDirection: 'column' as const,
-    height: '100%',
-    fontFamily: 'system-ui, sans-serif',
-  },
-  history: {
-    flex: 1,
-    overflowY: 'auto' as const,
-    display: 'flex' as const,
-    flexDirection: 'column' as const,
-    gap: 8,
-    padding: '12px 8px',
-  },
-  empty: {
-    fontSize: 13,
-    color: '#9ca3af',
-    textAlign: 'center' as const,
-    marginTop: 24,
-  },
-  bubble: {
-    maxWidth: '80%',
-    padding: '8px 12px',
-    fontSize: 13,
-    lineHeight: 1.5,
-    whiteSpace: 'pre-wrap' as const,
-    wordBreak: 'break-word' as const,
-  },
-  cursor: {
-    display: 'inline-block' as const,
-    animation: 'blink 0.8s step-end infinite',
-    opacity: 0.7,
-    marginLeft: 1,
-  },
-  inputRow: {
-    display: 'flex' as const,
-    gap: 6,
-    padding: '8px',
-    borderTop: '1px solid #e5e7eb',
-    alignItems: 'flex-end' as const,
-  },
-  textarea: {
-    flex: 1,
-    resize: 'none' as const,
-    border: '1px solid #d1d5db',
-    borderRadius: 6,
-    padding: '6px 10px',
-    fontSize: 13,
-    fontFamily: 'system-ui, sans-serif',
-    lineHeight: 1.4,
-    outline: 'none',
-  },
-  sendBtn: {
-    padding: '7px 16px',
-    background: '#1a73e8',
-    color: '#fff',
-    border: 'none',
-    borderRadius: 6,
-    fontSize: 13,
-    fontWeight: 600,
-    cursor: 'pointer',
-    flexShrink: 0,
-    height: 34,
-  },
-} as const;
+function Cursor() {
+  return (
+    <span className="inline-block ml-1 animate-pulse opacity-70">
+      ▍
+    </span>
+  );
+}

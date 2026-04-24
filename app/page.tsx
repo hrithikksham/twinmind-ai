@@ -1,11 +1,10 @@
 'use client';
 
-import { useCallback } from 'react';
+import { useCallback, useState } from 'react';
 
 import { TranscriptPanel } from '@/components/TranscriptPanel';
 import { SuggestionsPanel } from '@/components/SuggestionsPanel';
 import { ChatPanel } from '@/components/ChatPanel';
-import { MicButton } from '@/components/MicButton';
 
 import { useMicRecorder } from '@/hooks/useMicRecorder';
 import { useChat } from '@/hooks/useChat';
@@ -15,18 +14,19 @@ import { useTranscriptStore } from '@/store/transcriptStore';
 import { useSuggestionStore } from '@/store/suggestionStore';
 import { useSettingsStore } from '@/store/settingsStore';
 
-// ─── Page ─────────────────────────────────────────────────────────────────────
+import SettingsModal from '@/components/SettingsModal';
 
 export default function Page() {
-  // ── Store subscriptions ──────────────────────────────────────────────────
+  // ─── State ─────────────────────────────
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
 
+  // ─── Stores ────────────────────────────
   const segments = useTranscriptStore((s) => s.segments);
   const batches = useSuggestionStore((s) => s.allBatches);
   const groqApiKey = useSettingsStore((s) => s.groqApiKey);
   const contextWindowTokens = useSettingsStore((s) => s.contextWindowTokens);
 
-  // ── Stable getters (avoid stale closures in hooks) ───────────────────────
-
+  // ─── Derived ───────────────────────────
   const getSegments = useCallback(() => segments, [segments]);
 
   const getTranscript = useCallback(
@@ -34,8 +34,7 @@ export default function Page() {
     [segments],
   );
 
-  // ── Hooks — order matters: useChat first so sendSuggestion is available ──
-
+  // ─── Hooks ─────────────────────────────
   const { messages, isLoading, sendMessage, sendSuggestion } = useChat({
     getTranscript,
     groqApiKey,
@@ -50,25 +49,60 @@ export default function Page() {
     isRecording,
   });
 
-  // ── Render ───────────────────────────────────────────────────────────────
-
   return (
-    <div style={styles.root}>
-      {/* Top bar: title + mic control */}
-      <header style={styles.topBar}>
-        <h1 style={styles.title}>TwinMind</h1>
-        <MicButton isRecording={isRecording} onStart={start} onStop={stop} />
+    <div className="h-screen flex flex-col bg-[#dddffd] text-gray-900">
+      
+      {/* ─── Header ───────────────────────── */}
+      <header className="flex items-center justify-between px-6 py-3 backdrop-blur-md bg-white/70 border-b border-gray-200">
+        
+        {/* Title */}
+        <h1 className="text-[28px] font-semibold tracking-tight">
+          TwinMind
+        </h1>
+
+        {/* Settings Button */}
+        <button
+          onClick={() => setIsSettingsOpen(true)}
+          className="w-9 h-9 flex items-center justify-center rounded-full hover:bg-gray-100 transition hover:scale-105"
+        >
+          {/* Minimal gear icon */}
+          <svg
+            xmlns="http://www.w3.org/2000/svg"
+            className="w-9 h-9 text-gray-700"
+            fill="none"
+            viewBox="0 0 14 24"
+            stroke="currentColor"
+            strokeWidth={1}
+          >
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              d="M11.983 5.5a1.5 1.5 0 011.034.413l.634.634a1.5 1.5 0 001.06.44h.896a1.5 1.5 0 011.415 1.02l.308.924a1.5 1.5 0 00.364.586l.633.634a1.5 1.5 0 010 2.12l-.633.634a1.5 1.5 0 00-.364.586l-.308.924a1.5 1.5 0 01-1.415 1.02h-.896a1.5 1.5 0 00-1.06.44l-.634.634a1.5 1.5 0 01-2.12 0l-.634-.634a1.5 1.5 0 00-1.06-.44h-.896a1.5 1.5 0 01-1.415-1.02l-.308-.924a1.5 1.5 0 00-.364-.586l-.633-.634a1.5 1.5 0 010-2.12l.633-.634a1.5 1.5 0 00.364-.586l.308-.924A1.5 1.5 0 018.23 7.01h.896a1.5 1.5 0 001.06-.44l.634-.634a1.5 1.5 0 011.034-.413z"
+            />
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              d="M12 15a3 3 0 100-6 3 3 0 000 6z"
+            />
+          </svg>
+        </button>
       </header>
 
-      {/* Three-column layout */}
-      <div style={styles.columns}>
-        {/* Left: transcript feed */}
-        <div style={styles.col}>
-          <TranscriptPanel segments={segments} />
+      {/* ─── Main Layout ───────────────────── */}
+      <div className="flex flex-1 gap-4 p-4 overflow-hidden">
+
+        {/* Transcript */}
+        <div className="flex-[0.9] bg-white/100 backdrop-blur-md rounded-2xl shadow-sm overflow-hidden">
+          <TranscriptPanel
+            segments={segments}
+            isRecording={isRecording}
+            onStart={start}
+            onStop={stop}
+          />
         </div>
 
-        {/* Middle: suggestion batches */}
-        <div style={styles.col}>
+        {/* Suggestions */}
+        <div className="flex-[1.1] bg-white/80 backdrop-blur-md rounded-2xl shadow-sm overflow-hidden">
           <SuggestionsPanel
             batches={batches}
             isRefreshing={isRefreshing}
@@ -76,8 +110,8 @@ export default function Page() {
           />
         </div>
 
-        {/* Right: chat history + input */}
-        <div style={{ ...styles.col, borderRight: 'none' }}>
+        {/* Chat */}
+        <div className="flex-[1.1] bg-white/80 backdrop-blur-md rounded-2xl shadow-sm overflow-hidden">
           <ChatPanel
             messages={messages}
             isLoading={isLoading}
@@ -85,47 +119,12 @@ export default function Page() {
           />
         </div>
       </div>
+
+      {/* ─── Settings Modal ───────────────── */}
+      <SettingsModal
+        isOpen={isSettingsOpen}
+        onClose={() => setIsSettingsOpen(false)}
+      />
     </div>
   );
 }
-
-// ─── Layout styles ─────────────────────────────────────────────────────────────
-
-const styles = {
-  root: {
-    display: 'flex' as const,
-    flexDirection: 'column' as const,
-    height: '100vh',
-    overflow: 'hidden',
-    background: '#f9fafb',
-    fontFamily: 'system-ui, sans-serif',
-  },
-  topBar: {
-    display: 'flex' as const,
-    alignItems: 'center' as const,
-    gap: 16,
-    padding: '10px 20px',
-    background: '#ffffff',
-    borderBottom: '1px solid #e5e7eb',
-    flexShrink: 0,
-  },
-  title: {
-    margin: 0,
-    fontSize: 18,
-    fontWeight: 700,
-    color: '#111827',
-    letterSpacing: '-0.01em',
-  },
-  columns: {
-    flex: 1,
-    display: 'flex' as const,
-    overflow: 'hidden',
-  },
-  col: {
-    flex: 1,
-    minWidth: 0,
-    overflow: 'hidden',
-    borderRight: '1px solid #e5e7eb',
-    background: '#ffffff',
-  },
-} as const;

@@ -1,34 +1,72 @@
+/**
+ * TranscriptPanel.tsx 
+ * Left column. Shows the real-time transcript of what the user is saying, with timestamps.
+ * The transcript is updated live as the user speaks, and the panel automatically scrolls to show the latest segments.
+ * Each segment shows the spoken text and its timestamp, formatted in a human-friendly way.
+ * The design is clean and minimal, with a focus on readability and easy scanning of recent speech.
+ */
+
 'use client';
 
 import { useEffect, useRef } from 'react';
 import type { TranscriptSegment } from '../store/transcriptStore';
+import { MicButton } from './MicButton';
 
 interface TranscriptPanelProps {
   segments: TranscriptSegment[];
+  isRecording: boolean;
+  onStart: () => void;
+  onStop: () => void;
 }
 
-export function TranscriptPanel({ segments }: TranscriptPanelProps) {
+export function TranscriptPanel({
+  segments,
+  isRecording,
+  onStart,
+  onStop,
+}: TranscriptPanelProps) {
   const bottomRef = useRef<HTMLDivElement | null>(null);
 
-  // Auto-scroll on new segment
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [segments.length]);
 
   return (
-    <div style={styles.panel}>
-      <div style={styles.header}>Transcript</div>
+    <div className="flex flex-col h-full">
 
-      <div style={styles.list}>
+      {/* ─── Header with Mic ───────────────────── */}
+      <div className="flex items-center justify-between px-4 pt-3 pb-2">
+
+        <span className="text-[19px] text-blue-800 font-medium tracking-tight">
+          Transcript
+        </span>
+
+        <MicButton
+          isRecording={isRecording}
+          onStart={onStart}
+          onStop={onStop}
+        />
+      </div>
+
+      {/* ─── Transcript List ───────────────────── */}
+      <div className="flex-1 overflow-y-auto px-4 pb-4 flex flex-col gap-4">
+
         {segments.length === 0 ? (
-          <p style={styles.empty}>
-            Transcript will appear here once recording starts.
-          </p>
+          <div className="text-sm text-gray-400 text-center mt-10">
+            Start speaking to see transcript…
+          </div>
         ) : (
           segments.map((seg) => (
-            <div key={seg.id} style={styles.segment}>
-              <span style={styles.ts}>{formatTime(seg.ts)}</span>
-              <span style={styles.text}>{seg.text}</span>
+            <div key={seg.id} className="flex flex-col gap-1">
+
+              <div className="text-[11px] text-gray-400 tabular-nums">
+                {formatTime(seg.ts)}
+              </div>
+
+              <div className="text-[14px] text-gray-900 leading-relaxed">
+                {seg.text}
+              </div>
+
             </div>
           ))
         )}
@@ -39,7 +77,7 @@ export function TranscriptPanel({ segments }: TranscriptPanelProps) {
   );
 }
 
-// ─── Helpers ─────────────────────────────────────────
+// ─── Helpers ─────────────────────────
 
 function formatTime(iso: string): string {
   const date = new Date(iso);
@@ -51,52 +89,3 @@ function formatTime(iso: string): string {
         second: '2-digit',
       });
 }
-
-// ─── Styles ─────────────────────────────────────────
-
-const styles = {
-  panel: {
-    display: 'flex' as const,
-    flexDirection: 'column' as const,
-    height: '100%',
-    fontFamily: 'system-ui, sans-serif',
-  },
-  header: {
-    fontSize: 13,
-    fontWeight: 600,
-    color: '#374151',
-    textTransform: 'uppercase' as const,
-    letterSpacing: '0.05em',
-    padding: '10px 8px 6px',
-    borderBottom: '1px solid #e5e7eb',
-  },
-  list: {
-    flex: 1,
-    overflowY: 'auto' as const,
-    padding: '8px',
-    display: 'flex' as const,
-    flexDirection: 'column' as const,
-    gap: 10,
-  },
-  empty: {
-    fontSize: 13,
-    color: '#9ca3af',
-    textAlign: 'center' as const,
-    marginTop: 24,
-  },
-  segment: {
-    display: 'flex' as const,
-    flexDirection: 'column' as const,
-    gap: 2,
-  },
-  ts: {
-    fontSize: 10,
-    color: '#9ca3af',
-    fontVariantNumeric: 'tabular-nums' as const,
-  },
-  text: {
-    fontSize: 13,
-    color: '#111827',
-    lineHeight: 1.5,
-  },
-} as const;

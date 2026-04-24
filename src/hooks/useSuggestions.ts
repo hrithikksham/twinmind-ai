@@ -1,9 +1,7 @@
 'use client';
 
 /**
- * useSuggestions.ts
- *
- * Orchestration hook.
+ * useSuggestions.ts — FIXED (stable + efficient)
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -17,8 +15,8 @@ import type { TranscriptSegment } from '../services/contextBuilder';
 import { useSuggestionStore } from '../store/suggestionStore';
 import type { Suggestion } from '../utils/validators';
 
-// 🔥 faster refresh for better UX
-const REFRESH_INTERVAL_MS = 10_000;
+const REFRESH_INTERVAL_MS = 10000; // 10s
+const MIN_REFRESH_GAP_MS = 5000;   // prevent spam
 
 export interface UseSuggestionsOptions {
   getSegments: () => TranscriptSegment[];
@@ -47,15 +45,26 @@ export function useSuggestions({
   const lastSummaryAtRef = useRef<number | null>(null);
   const isRefreshingRef = useRef(false);
 
+  const lastRunRef = useRef(0);
+  const lastSegmentCountRef = useRef(0);
+
   // ── Core refresh ────────────────────────────────
 
   const refresh = useCallback(async () => {
+    const now = Date.now();
+
+    // 🚫 prevent spam
     if (isRefreshingRef.current) return;
+    if (now - lastRunRef.current < MIN_REFRESH_GAP_MS) return;
 
     const segments = getSegments();
-
-    // ✅ allow refresh even after recording stops
     if (segments.length === 0) return;
+
+    // 🚫 only run if transcript changed
+    if (segments.length === lastSegmentCountRef.current) return;
+
+    lastSegmentCountRef.current = segments.length;
+    lastRunRef.current = now;
 
     isRefreshingRef.current = true;
     store.setIsRefreshing(true);
@@ -97,7 +106,7 @@ export function useSuggestions({
       }
     } catch (err) {
       store.markRefreshFailed(
-        err instanceof Error ? err.message : 'Unknown error during refresh',
+        err instanceof Error ? err.message : 'Unknown error',
       );
     } finally {
       isRefreshingRef.current = false;
@@ -105,10 +114,9 @@ export function useSuggestions({
     }
   }, [getSegments, contextWindowTokens, rollingSummary, store]);
 
-  // ── Auto refresh loop ───────────────────────────
+  // ── Controlled interval (NO spam) ───────────────
 
   useEffect(() => {
-    // ✅ allow running even if recording stopped (as long as transcript exists)
     if (!isRecording && getSegments().length === 0) return;
 
     const interval = setInterval(() => {
@@ -116,18 +124,7 @@ export function useSuggestions({
     }, REFRESH_INTERVAL_MS);
 
     return () => clearInterval(interval);
-  }, [isRecording, refresh, getSegments]);
-
-  // ── 🔥 Immediate trigger after transcript update ──
-
-  useEffect(() => {
-    const segments = getSegments();
-
-    if (segments.length > 0 && !isRefreshingRef.current) {
-      void refresh(); // 🔥 critical fix
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rollingSummary]); // avoids infinite loop
+  }, [isRecording]); // ✅ FIXED
 
   // ── Click handler ───────────────────────────────
 
@@ -167,7 +164,7 @@ async function maybeRecomputeSummary(
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         systemPrompt:
-          'You are a precise meeting summarizer. Output only the 2–3 sentence summary — no preamble, no labels, no markdown.',
+          'You are a precise meeting summarizer. Output only the summary.',
         userPrompt: prompt,
         maxTokens: 150,
       }),
@@ -177,14 +174,11 @@ async function maybeRecomputeSummary(
 
     const data = (await response.json()) as { content?: string };
 
-    // ✅ safe return
     return typeof data.content === 'string'
       ? data.content
       : existingSummary;
 
   } catch {
-    // silent fail
+    return existingSummary;
   }
-
-  return existingSummary;
 }

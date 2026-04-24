@@ -21,7 +21,7 @@ export default function Page() {
   // ── Store subscriptions ──────────────────────────────────────────────────
 
   const segments = useTranscriptStore((s) => s.segments);
-  const batches = useSuggestionStore((s) => s.batches);
+  const batches = useSuggestionStore((s) => s.allBatches);
   const groqApiKey = useSettingsStore((s) => s.groqApiKey);
   const contextWindowTokens = useSettingsStore((s) => s.contextWindowTokens);
 

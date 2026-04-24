@@ -1,25 +1,16 @@
-/**
- * TranscriptPanel.tsx
- *
- * Left column. Renders transcript segments in arrival order.
- * Auto-scrolls to the latest segment. No editing, no mutation.
- */
+'use client';
 
-import React, { useEffect, useRef } from 'react';
+import { useEffect, useRef } from 'react';
 import type { TranscriptSegment } from '../store/transcriptStore';
-
-// ─── Props ────────────────────────────────────────────────────────────────────
 
 interface TranscriptPanelProps {
   segments: TranscriptSegment[];
 }
 
-// ─── Component ────────────────────────────────────────────────────────────────
-
 export function TranscriptPanel({ segments }: TranscriptPanelProps) {
-  const bottomRef = useRef<HTMLDivElement>(null);
+  const bottomRef = useRef<HTMLDivElement | null>(null);
 
-  // Scroll to bottom whenever a new segment is appended
+  // Auto-scroll on new segment
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [segments.length]);
@@ -29,36 +20,39 @@ export function TranscriptPanel({ segments }: TranscriptPanelProps) {
       <div style={styles.header}>Transcript</div>
 
       <div style={styles.list}>
-        {segments.length === 0 && (
-          <p style={styles.empty}>Transcript will appear here once recording starts.</p>
+        {segments.length === 0 ? (
+          <p style={styles.empty}>
+            Transcript will appear here once recording starts.
+          </p>
+        ) : (
+          segments.map((seg) => (
+            <div key={seg.id} style={styles.segment}>
+              <span style={styles.ts}>{formatTime(seg.ts)}</span>
+              <span style={styles.text}>{seg.text}</span>
+            </div>
+          ))
         )}
-        {segments.map((seg) => (
-          <div key={seg.id} style={styles.segment}>
-            <span style={styles.ts}>{formatTime(seg.ts)}</span>
-            <span style={styles.text}>{seg.text}</span>
-          </div>
-        ))}
+
         <div ref={bottomRef} />
       </div>
     </div>
   );
 }
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+// ─── Helpers ─────────────────────────────────────────
 
 function formatTime(iso: string): string {
-  try {
-    return new Date(iso).toLocaleTimeString([], {
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
-    });
-  } catch {
-    return '';
-  }
+  const date = new Date(iso);
+  return isNaN(date.getTime())
+    ? ''
+    : date.toLocaleTimeString([], {
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+      });
 }
 
-// ─── Styles ───────────────────────────────────────────────────────────────────
+// ─── Styles ─────────────────────────────────────────
 
 const styles = {
   panel: {

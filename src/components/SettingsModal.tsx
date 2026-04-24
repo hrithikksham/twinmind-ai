@@ -1,8 +1,6 @@
-// src/components/SettingsModal.tsx
-
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useSettingsStore } from '../store/settingsStore';
 
 type Props = {
@@ -11,14 +9,21 @@ type Props = {
 };
 
 export default function SettingsModal({ isOpen, onClose }: Props) {
-  const { apiKey, setApiKey } = useSettingsStore();
+  const { groqApiKey, setGroqApiKey } = useSettingsStore();
 
-  const [localKey, setLocalKey] = useState(apiKey || '');
+  const [localKey, setLocalKey] = useState(groqApiKey || '');
+
+  // Sync when modal opens (important UX fix)
+  useEffect(() => {
+    if (isOpen) {
+      setLocalKey(groqApiKey || '');
+    }
+  }, [isOpen, groqApiKey]);
 
   if (!isOpen) return null;
 
   const handleSave = () => {
-    setApiKey(localKey.trim());
+    setGroqApiKey(localKey.trim());
     onClose();
   };
 

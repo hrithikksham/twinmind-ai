@@ -1,65 +1,131 @@
-import Image from "next/image";
+'use client';
 
-export default function Home() {
+import { useCallback } from 'react';
+
+import { TranscriptPanel } from '@/components/TranscriptPanel';
+import { SuggestionsPanel } from '@/components/SuggestionsPanel';
+import { ChatPanel } from '@/components/ChatPanel';
+import { MicButton } from '@/components/MicButton';
+
+import { useMicRecorder } from '@/hooks/useMicRecorder';
+import { useChat } from '@/hooks/useChat';
+import { useSuggestions } from '@/hooks/useSuggestions';
+
+import { useTranscriptStore } from '@/store/transcriptStore';
+import { useSuggestionStore } from '@/store/suggestionStore';
+import { useSettingsStore } from '@/store/settingsStore';
+
+// ─── Page ─────────────────────────────────────────────────────────────────────
+
+export default function Page() {
+  // ── Store subscriptions ──────────────────────────────────────────────────
+
+  const segments = useTranscriptStore((s) => s.segments);
+  const batches = useSuggestionStore((s) => s.allBatches);
+  const groqApiKey = useSettingsStore((s) => s.groqApiKey);
+  const contextWindowTokens = useSettingsStore((s) => s.contextWindowTokens);
+
+  // ── Stable getters (avoid stale closures in hooks) ───────────────────────
+
+  const getSegments = useCallback(() => segments, [segments]);
+
+  const getTranscript = useCallback(
+    () => segments.map((seg) => `[${seg.ts}] ${seg.text}`).join('\n'),
+    [segments],
+  );
+
+  // ── Hooks — order matters: useChat first so sendSuggestion is available ──
+
+  const { messages, isLoading, sendMessage, sendSuggestion } = useChat({
+    getTranscript,
+    groqApiKey,
+  });
+
+  const { isRecording, start, stop } = useMicRecorder();
+
+  const { isRefreshing, handleSuggestionClick } = useSuggestions({
+    getSegments,
+    contextWindowTokens,
+    onSuggestionClick: sendSuggestion,
+    isRecording,
+  });
+
+  // ── Render ───────────────────────────────────────────────────────────────
+
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
+    <div style={styles.root}>
+      {/* Top bar: title + mic control */}
+      <header style={styles.topBar}>
+        <h1 style={styles.title}>TwinMind</h1>
+        <MicButton isRecording={isRecording} onStart={start} onStop={stop} />
+      </header>
+
+      {/* Three-column layout */}
+      <div style={styles.columns}>
+        {/* Left: transcript feed */}
+        <div style={styles.col}>
+          <TranscriptPanel segments={segments} />
         </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
+
+        {/* Middle: suggestion batches */}
+        <div style={styles.col}>
+          <SuggestionsPanel
+            batches={batches}
+            isRefreshing={isRefreshing}
+            onSuggestionClick={handleSuggestionClick}
+          />
         </div>
-      </main>
+
+        {/* Right: chat history + input */}
+        <div style={{ ...styles.col, borderRight: 'none' }}>
+          <ChatPanel
+            messages={messages}
+            isLoading={isLoading}
+            onSendMessage={sendMessage}
+          />
+        </div>
+      </div>
     </div>
   );
 }
+
+// ─── Layout styles ─────────────────────────────────────────────────────────────
+
+const styles = {
+  root: {
+    display: 'flex' as const,
+    flexDirection: 'column' as const,
+    height: '100vh',
+    overflow: 'hidden',
+    background: '#f9fafb',
+    fontFamily: 'system-ui, sans-serif',
+  },
+  topBar: {
+    display: 'flex' as const,
+    alignItems: 'center' as const,
+    gap: 16,
+    padding: '10px 20px',
+    background: '#ffffff',
+    borderBottom: '1px solid #e5e7eb',
+    flexShrink: 0,
+  },
+  title: {
+    margin: 0,
+    fontSize: 18,
+    fontWeight: 700,
+    color: '#111827',
+    letterSpacing: '-0.01em',
+  },
+  columns: {
+    flex: 1,
+    display: 'flex' as const,
+    overflow: 'hidden',
+  },
+  col: {
+    flex: 1,
+    minWidth: 0,
+    overflow: 'hidden',
+    borderRight: '1px solid #e5e7eb',
+    background: '#ffffff',
+  },
+} as const;

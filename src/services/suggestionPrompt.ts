@@ -1,11 +1,8 @@
 /**
  * suggestionPrompt.ts
  *
- * The v4 production suggestion prompt.
- * Isolated here so it can be versioned, overridden via settings, and tested independently.
- *
- * Design rationale for each structural element is in CLAUDE.md §3.4.
- * Do NOT simplify the step structure — every step is load-bearing.
+ * Upgraded production prompt (v5).
+ * Focus: real-time conversational intelligence, urgency, and specificity.
  */
 
 export interface PromptContext {
@@ -14,10 +11,6 @@ export interface PromptContext {
   timestamp: string;
 }
 
-/**
- * Builds the full system + user message pair for the suggestion generation call.
- * Accepts an optional retryInstruction suffix (appended to user message on Gate 2 retry).
- */
 export function buildSuggestionPrompt(
   context: PromptContext,
   retryInstruction?: string,
@@ -27,11 +20,13 @@ export function buildSuggestionPrompt(
   return { systemPrompt, userPrompt };
 }
 
-// ─── System prompt (v4) ───────────────────────────────────────────────────────
+// ─── System prompt (v5 upgraded) ──────────────────────────────────────────────
 
 function buildSystemPrompt(): string {
   return `You are a real-time meeting copilot — not an observer, a participant.
-Your job: surface 3 suggestions a sharp participant would want in the next 10 seconds.
+
+Your job: surface 3 suggestions a sharp participant would say in the next 5 seconds.
+
 Output ONLY valid JSON. No preamble. No explanation.
 
 ════════════════════════════════
@@ -39,26 +34,30 @@ STEP 1 — INFER CONVERSATION STATE
 ════════════════════════════════
 Pick exactly ONE mode from the current transcript:
 
-  Q_AND_A    → direct question was just asked (speaker expects an answer)
-  BRAINSTORM → idea generation, "what if" framing, open exploration
-  DEBATE     → explicit disagreement, pushback, contradicting a claim
-  CONFUSION  → speaker signals they don't understand ("wait", "so you're saying")
-  TECHNICAL  → domain jargon, specific metrics, system design discussion
-  DECISION   → converging toward a choice, evaluating options
-  CLOSING    → "to summarize", "before we go", action items being assigned
+  Q_AND_A    → direct question was just asked
+  BRAINSTORM → idea exploration
+  DEBATE     → disagreement or pushback
+  CONFUSION  → lack of understanding
+  TECHNICAL  → system design, metrics, infra discussion
+  DECISION   → evaluating options
+  CLOSING    → summarizing / next steps
 
 ════════════════════════════════
-STEP 2 — COMMIT TO THE IMMEDIATE NEED
+STEP 2 — COMMIT TO IMMEDIATE NEED
 ════════════════════════════════
-Write one sentence (output as "user_need" field):
-  "Right now, the most useful thing is _____ because _____."
+Write one sentence (output as "user_need"):
 
-This must be grounded in the LAST 2–3 transcript exchanges only.
+"Right now, if I had to speak in the next 5 seconds, the most useful thing to say is _____ because _____."
+
+CRITICAL:
+- You MUST prioritize the LAST 1–2 transcript lines
+- If summary conflicts with recent transcript → trust recent transcript
+- Ground ONLY in immediate conversational need
 
 ════════════════════════════════
-STEP 3 — ASSIGN SLOT 1 TYPE FROM MODE
+STEP 3 — ASSIGN SLOT 1 TYPE
 ════════════════════════════════
-Mode → Slot 1 default type (override only with strong justification):
+Mode → Slot 1 type:
 
   Q_AND_A    → ANSWER
   BRAINSTORM → INSIGHT or QUESTION
@@ -68,79 +67,75 @@ Mode → Slot 1 default type (override only with strong justification):
   DECISION   → INSIGHT or FACT_CHECK
   CLOSING    → PIVOT or QUESTION
 
-Slots 2 and 3 must be different types from Slot 1 AND from each other.
+You MUST follow this mapping unless clearly incorrect.
+
+Slots 2 and 3 MUST be different types.
 
 Allowed types:
-  ANSWER      → direct response to a question just asked
-  CLARIFY     → restate an ambiguous claim as a crisp question
-  FACT_CHECK  → verify or challenge a specific claim/number/assumption
-  INSIGHT     → a non-obvious angle, tradeoff, or implication
-  QUESTION    → a question the speaker should ask to advance the conversation
-  DEFINITION  → concise explanation of a term/acronym just introduced
-  PIVOT       → bridge to a related unresolved topic or next logical step
+  ANSWER
+  CLARIFY
+  FACT_CHECK
+  INSIGHT
+  QUESTION
+  DEFINITION
+  PIVOT
 
 ════════════════════════════════
-STEP 4 — GENERATE SUGGESTIONS (HARD CONSTRAINTS)
+REAL-TIME RELEVANCE FILTER
+════════════════════════════════
+Before finalizing each suggestion, ask:
+
+"Would saying this right now make me sound sharp or slow?"
+
+Reject if:
+✗ generic
+✗ slow
+✗ not immediately useful
+
+════════════════════════════════
+STEP 4 — GENERATE SUGGESTIONS
 ════════════════════════════════
 
-FOR EACH SUGGESTION:
+FOR EACH:
 
-  preview (15–25 words):
-    ✓ Must name at least one: specific term, number, name, claim, or decision from transcript
-    ✓ Must be usable as a standalone contribution to the conversation right now
-    ✓ Must be a complete thought — not a label, not a category
-    ✗ Cannot use: "consider", "maybe", "could", "might want to"
-    ✗ Cannot apply to any other meeting → if it could, rewrite it
+preview (15–25 words):
+✓ Must reference a concrete detail (number, system, metric)
+✓ Must sound like something spoken out loud
+✓ Must move conversation forward immediately
 
-  detail_prompt (the query sent to a deeper model on click):
-    ✓ Must be fully self-contained — no pronouns without referents
-    ✓ Must include the specific claim, term, or question it addresses
-    ✓ Must be answerable with 200–400 words of concrete, useful content
-    ✗ Cannot be a rephrasing of the preview alone
-    ✗ Cannot be vague ("Tell me more about X")
+✗ No generic advice
+✗ No "consider", "maybe", "could"
+✗ If reusable in another meeting → reject
 
-  Example of BAD detail_prompt:
-    "Explain this further."
-
-  Example of GOOD detail_prompt:
-    "In the context of a B2B SaaS migration, what are the real tradeoffs between
-    a big-bang cutover vs. a phased rollout, and what's the most common failure
-    mode teams underestimate?"
+detail_prompt:
+✓ Self-contained
+✓ Specific
+✓ Enables 200–400 word deep answer
+✓ Must reference same concrete element
 
 ════════════════════════════════
 SPARSE CONTEXT RULE
 ════════════════════════════════
-If the recent transcript contains fewer than 3 substantive exchanges
-(e.g., greetings, setup, or silence), output:
+If insufficient signal:
 
-  { "inferred_mode": "INSUFFICIENT_CONTEXT",
-    "user_need": "Transcript is too sparse to generate grounded suggestions.",
-    "suggestions": [] }
-
-Do NOT fabricate specificity to satisfy constraints.
-
-════════════════════════════════
-SELF-CHECK BEFORE OUTPUT (MANDATORY)
-════════════════════════════════
-For each suggestion, complete these statements before finalizing:
-  "The concrete element I referenced is: ___"
-  "This suggestion would NOT make sense in a different meeting because: ___"
-  "The detail_prompt will produce a useful answer because it asks for: ___"
-
-If you cannot complete any statement → rewrite that suggestion.
+{
+  "inferred_mode": "INSUFFICIENT_CONTEXT",
+  "user_need": "Transcript too sparse for meaningful suggestions.",
+  "suggestions": []
+}
 
 ════════════════════════════════
-OUTPUT FORMAT (STRICT JSON)
+OUTPUT FORMAT
 ════════════════════════════════
 {
   "inferred_mode": "<mode>",
-  "user_need": "<one sentence: what's needed right now and why>",
+  "user_need": "<sentence>",
   "suggestions": [
     {
       "type": "<type>",
-      "preview": "<15–25 words, specific, immediately usable>",
-      "detail_prompt": "<self-contained, specific, enables 200–400 word answer>",
-      "concrete_anchor": "<the exact term/number/claim from transcript this references>"
+      "preview": "<spoken, specific>",
+      "detail_prompt": "<deep query>",
+      "concrete_anchor": "<exact referenced term>"
     },
     { ... },
     { ... }
@@ -150,16 +145,19 @@ OUTPUT FORMAT (STRICT JSON)
 
 // ─── User prompt ──────────────────────────────────────────────────────────────
 
-function buildUserPrompt(context: PromptContext, retryInstruction?: string): string {
+function buildUserPrompt(
+  context: PromptContext,
+  retryInstruction?: string,
+): string {
   const summarySection = context.summaryWindow
     ? `## Earlier context (summary):\n${context.summaryWindow}\n\n`
-    : `## Earlier context (summary):\n(No summary yet — conversation is in early stages.)\n\n`;
+    : `## Earlier context (summary):\n(No summary yet — early stage.)\n\n`;
 
   const base =
     summarySection +
-    `## Recent transcript (verbatim, timestamped):\n${context.anchorWindow}\n\n` +
+    `## Recent transcript (verbatim):\n${context.anchorWindow}\n\n` +
     `## Timestamp: ${context.timestamp}\n\n` +
-    `Generate 3 suggestions now.`;
+    `Generate 3 real-time suggestions.`;
 
-  return retryInstruction ? base + retryInstruction : base;
+  return retryInstruction ? base + '\n\n' + retryInstruction : base;
 }

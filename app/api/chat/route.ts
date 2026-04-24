@@ -10,7 +10,7 @@
 import { NextRequest } from 'next/server';
 
 const GROQ_CHAT_URL = 'https://api.groq.com/openai/v1/chat/completions';
-const GROQ_MODEL    = 'gpt-oss-120b';
+const GROQ_MODEL = 'llama-3.3-70b-versatile';
 
 // ─── System prompt (CLAUDE.md §5) ─────────────────────────────────────────────
 

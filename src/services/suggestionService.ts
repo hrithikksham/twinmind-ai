@@ -2,44 +2,42 @@
  * suggestionService.ts
  *
  * Pure async service — no store access, no side effects.
- * Receives data as arguments, returns validated SuggestionBatch or throws.
- *
- * Three-gate validation flow (CLAUDE.md §8 Runtime Validation):
- *   Gate 1 — Zod schema (structural)
- *   Gate 2 — Semantic heuristics (specificity, diversity, depth)
- *   Gate 3 — Graceful degradation (retry once, fall back to previous batch)
  */
 
-import { SuggestionResponseSchema, type SuggestionBatch } from '../utils/validators';
+import {
+  SuggestionResponseSchema,
+  type SuggestionBatch,
+} from '../utils/validators';
+
 import {
   validateSemantics,
   buildRetryInstruction,
-  type SemanticValidationResult,
 } from '../utils/semanticValidators';
-import { buildSuggestionPrompt, type PromptContext } from './suggestionPrompt';
 
-// ─── Types ────────────────────────────────────────────────────────────────────
+import {
+  buildSuggestionPrompt,
+  type PromptContext,
+} from './suggestionPrompt';
+
+// ─── Types ────────────────────────────────────────
 
 export interface SuggestionServiceInput {
   anchorWindow: string;
   summaryWindow: string;
   timestamp: string;
   contextWindowTokens?: number;
-  groqApiKey: string;
 }
 
 export type SuggestionServiceResult =
   | { ok: true; batch: SuggestionBatch; retried: boolean }
-  | { ok: false; reason: 'GATE1_FAIL' | 'GATE2_FAIL' | 'NETWORK_ERROR'; detail: string };
+  | {
+      ok: false;
+      reason: 'GATE1_FAIL' | 'GATE2_FAIL' | 'NETWORK_ERROR';
+      detail: string;
+    };
 
-// ─── Public entry point ───────────────────────────────────────────────────────
+// ─── Entry ────────────────────────────────────────
 
-/**
- * Fetches a validated suggestion batch.
- * Handles retry logic internally — caller gets a clean result or failure reason.
- *
- * This function is called by useSuggestions hook. It never touches any store.
- */
 export async function fetchSuggestions(
   input: SuggestionServiceInput,
 ): Promise<SuggestionServiceResult> {
@@ -49,10 +47,10 @@ export async function fetchSuggestions(
     timestamp: input.timestamp,
   };
 
-  // ── First attempt ──────────────────────────────────────────────────────────
-  let rawResponse: string;
+  let raw: string;
+
   try {
-    rawResponse = await callSuggestionsAPI(context, input.groqApiKey);
+    raw = await callSuggestionsAPI(context);
   } catch (err) {
     return {
       ok: false,
@@ -61,41 +59,40 @@ export async function fetchSuggestions(
     };
   }
 
-  // Gate 1 — structural
-  const gate1Result = runGate1(rawResponse);
-  if (!gate1Result.ok) {
-    // Retry with JSON-strict instruction
-    return await retryWithInstruction(context, input.groqApiKey, 'GATE1');
+  // ── Gate 1
+  const gate1 = runGate1(raw);
+
+  if (!gate1.ok) {
+    return retryWithInstruction(context, 'GATE1');
   }
 
-  // Gate 2 — semantic
-  const semanticResult = validateSemantics(gate1Result.batch);
-  if (!semanticResult.passed) {
-    // Retry with specificity-reinforcement instruction
-    const retryInstruction = buildRetryInstruction(semanticResult.failures);
-    return await retryWithInstruction(context, input.groqApiKey, 'GATE2', retryInstruction);
+  // ── Gate 2
+  const semantic = validateSemantics(gate1.batch);
+
+  if (!semantic.passed) {
+    const retryInstruction = buildRetryInstruction(semantic.failures);
+    return retryWithInstruction(context, 'GATE2', retryInstruction);
   }
 
-  return { ok: true, batch: gate1Result.batch, retried: false };
+  return { ok: true, batch: gate1.batch, retried: false };
 }
 
-// ─── Retry path ───────────────────────────────────────────────────────────────
+// ─── Retry ────────────────────────────────────────
 
 async function retryWithInstruction(
   context: PromptContext,
-  groqApiKey: string,
   failedGate: 'GATE1' | 'GATE2',
   retryInstruction?: string,
 ): Promise<SuggestionServiceResult> {
-  const jsonStrictInstruction =
+  const instruction =
     failedGate === 'GATE1'
-      ? '\n\nCRITICAL: Your previous output was not valid JSON. Output ONLY a single JSON object. ' +
-        'No markdown fences, no preamble, no explanation. Start your response with "{" and end with "}".'
+      ? '\n\nCRITICAL: Output ONLY valid JSON. No markdown. No explanation.'
       : retryInstruction ?? '';
 
-  let rawRetry: string;
+  let raw: string;
+
   try {
-    rawRetry = await callSuggestionsAPI(context, groqApiKey, jsonStrictInstruction);
+    raw = await callSuggestionsAPI(context, instruction);
   } catch (err) {
     return {
       ok: false,
@@ -104,33 +101,34 @@ async function retryWithInstruction(
     };
   }
 
-  // Gate 1 on retry
-  const gate1Retry = runGate1(rawRetry);
-  if (!gate1Retry.ok) {
-    return { ok: false, reason: 'GATE1_FAIL', detail: gate1Retry.error };
-  }
+  const gate1 = runGate1(raw);
 
-  // Gate 2 on retry
-  const semanticRetry = validateSemantics(gate1Retry.batch);
-  if (!semanticRetry.passed) {
+  if (!gate1.ok) {
     return {
       ok: false,
-      reason: 'GATE2_FAIL',
-      detail: `Semantic failures after retry: ${semanticRetry.failures.join(', ')}`,
+      reason: 'GATE1_FAIL',
+      detail: gate1.error,
     };
   }
 
-  return { ok: true, batch: gate1Retry.batch, retried: true };
+  const semantic = validateSemantics(gate1.batch);
+
+  if (!semantic.passed) {
+    return {
+      ok: false,
+      reason: 'GATE2_FAIL',
+      detail: semantic.failures.join(', '),
+    };
+  }
+
+  return { ok: true, batch: gate1.batch, retried: true };
 }
 
-// ─── Gate 1 runner ────────────────────────────────────────────────────────────
+// ─── Gate 1 (STRICT FIX) ──────────────────────────
 
-type Gate1Result =
+function runGate1(raw: string):
   | { ok: true; batch: SuggestionBatch }
-  | { ok: false; error: string };
-
-function runGate1(raw: string): Gate1Result {
-  // Strip any accidental markdown fences before parsing
+  | { ok: false; error: string } {
   const cleaned = raw
     .replace(/^```json\s*/i, '')
     .replace(/^```\s*/i, '')
@@ -138,35 +136,44 @@ function runGate1(raw: string): Gate1Result {
     .trim();
 
   let parsed: unknown;
+
   try {
     parsed = JSON.parse(cleaned);
   } catch (err) {
-    return { ok: false, error: `JSON parse failed: ${err instanceof Error ? err.message : String(err)}` };
-  }
-
-  const result = SuggestionResponseSchema.safeParse(parsed);
-  if (!result.success) {
     return {
       ok: false,
-      error: `Zod validation failed: ${result.error.issues.map((i) => i.message).join('; ')}`,
+      error: `JSON parse failed: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
     };
   }
 
-  return { ok: true, batch: result.data };
+  const result = SuggestionResponseSchema.safeParse(parsed);
+
+  if (!result.success) {
+    return {
+      ok: false,
+      error: result.error.issues.map((i) => i.message).join('; '),
+    };
+  }
+
+  // ✅ CRITICAL: now guaranteed non-undefined
+  return {
+    ok: true,
+    batch: result.data,
+  };
 }
 
-// ─── API call ─────────────────────────────────────────────────────────────────
+// ─── API ──────────────────────────────────────────
 
-/**
- * Calls /api/suggestions — the thin Next.js route that proxies to Groq.
- * The route injects the GROQ_API_KEY server-side; we pass key here for client-side override support.
- */
 async function callSuggestionsAPI(
   context: PromptContext,
-  groqApiKey: string,
   retryInstruction?: string,
 ): Promise<string> {
-  const { systemPrompt, userPrompt } = buildSuggestionPrompt(context, retryInstruction);
+  const { systemPrompt, userPrompt } = buildSuggestionPrompt(
+    context,
+    retryInstruction,
+  );
 
   const response = await fetch('/api/suggestions', {
     method: 'POST',
@@ -174,7 +181,6 @@ async function callSuggestionsAPI(
     body: JSON.stringify({
       systemPrompt,
       userPrompt,
-      groqApiKey,
     }),
   });
 
@@ -183,11 +189,16 @@ async function callSuggestionsAPI(
     throw new Error(`/api/suggestions ${response.status}: ${errText}`);
   }
 
-  const data = await response.json();
+  const data: unknown = await response.json();
 
-  if (typeof data.content !== 'string') {
-    throw new Error(`Unexpected /api/suggestions response shape: ${JSON.stringify(data)}`);
+  if (
+    !data ||
+    typeof data !== 'object' ||
+    !('content' in data) ||
+    typeof (data as Record<string, unknown>).content !== 'string'
+  ) {
+    throw new Error('Invalid /api/suggestions response shape');
   }
 
-  return data.content;
+  return (data as Record<string, string>).content;
 }

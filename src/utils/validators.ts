@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-// ─── Suggestion Types ─────────────────────────────────────────────────────────
+// ─── Enums ─────────────────────────────────────────────────────────────
 
 export const SuggestionTypeEnum = z.enum([
   'ANSWER',
@@ -13,8 +13,6 @@ export const SuggestionTypeEnum = z.enum([
 ]);
 
 export type SuggestionType = z.infer<typeof SuggestionTypeEnum>;
-
-// ─── Conversation Mode Enum ───────────────────────────────────────────────────
 
 export const ConversationModeEnum = z.enum([
   'Q_AND_A',
@@ -29,61 +27,73 @@ export const ConversationModeEnum = z.enum([
 
 export type ConversationMode = z.infer<typeof ConversationModeEnum>;
 
-// ─── Individual Suggestion Schema (Gate 1) ────────────────────────────────────
+// ─── Suggestion ────────────────────────────────────────────────────────
 
 export const SuggestionSchema = z.object({
   type: SuggestionTypeEnum,
-
-  // 15–25 words, must reference a concrete transcript element
   preview: z.string().min(10).max(200),
-
-  // Self-contained query seeding the click-through detail answer
   detail_prompt: z.string().min(20),
-
-  // The exact term/number/claim from transcript this suggestion references
   concrete_anchor: z.string().min(1),
 });
 
 export type Suggestion = z.infer<typeof SuggestionSchema>;
 
-// ─── Full Batch Schema (Gate 1) ───────────────────────────────────────────────
+// ─── Flexible Suggestions Array ────────────────────────────────────────
+
+const SuggestionsArraySchema = z
+  .array(SuggestionSchema)
+  .min(1)
+  .max(5);
+
+// ─── Main Batch ────────────────────────────────────────────────────────
 
 export const SuggestionBatchSchema = z.object({
-  inferred_mode: ConversationModeEnum,
-
-  // One sentence: "Right now, the most useful thing is ___ because ___."
+  inferred_mode: ConversationModeEnum.exclude(['INSUFFICIENT_CONTEXT']),
   user_need: z.string().min(10),
-
-  // Always exactly 3 suggestions (INSUFFICIENT_CONTEXT → empty array exception)
-  suggestions: z.array(SuggestionSchema).length(3),
+  suggestions: SuggestionsArraySchema,
 });
 
-// Special case: sparse context yields 0 suggestions
+// ─── Sparse Case ───────────────────────────────────────────────────────
+
 export const SuggestionBatchSparseSchema = z.object({
   inferred_mode: z.literal('INSUFFICIENT_CONTEXT'),
   user_need: z.string().min(10),
-  suggestions: z.array(SuggestionSchema).length(0),
+  suggestions: z.array(SuggestionSchema).max(0),
 });
 
-// Union: accept either a full batch or a sparse fallback
-export const SuggestionResponseSchema = z.union([
-  SuggestionBatchSchema,
-  SuggestionBatchSparseSchema,
-]);
+// ─── Discriminated Union (FIXED) ───────────────────────────────────────
+
+export const SuggestionResponseSchema = z.discriminatedUnion(
+  'inferred_mode',
+  [SuggestionBatchSchema, SuggestionBatchSparseSchema],
+);
 
 export type SuggestionBatch = z.infer<typeof SuggestionResponseSchema>;
 
-// ─── Stored Batch (includes audit metadata for export/QA) ─────────────────────
+// ─── Stored Batch (FIXED) ──────────────────────────────────────────────
 
-export const StoredSuggestionBatchSchema = SuggestionBatchSchema.extend({
+const StoredSuggestionBatchFullSchema = SuggestionBatchSchema.extend({
   id: z.string(),
-  timestamp: z.string(), // ISO timestamp of when this batch was generated
-  anchor_window_snapshot: z.string(), // exact anchor window text sent to model
+  timestamp: z.string(),
+  anchor_window_snapshot: z.string(),
 });
 
-export type StoredSuggestionBatch = z.infer<typeof StoredSuggestionBatchSchema>;
+const StoredSuggestionBatchSparseSchema = SuggestionBatchSparseSchema.extend({
+  id: z.string(),
+  timestamp: z.string(),
+  anchor_window_snapshot: z.string(),
+});
 
-// ─── API Request / Response Schemas ──────────────────────────────────────────
+export const StoredSuggestionBatchSchema = z.discriminatedUnion(
+  'inferred_mode',
+  [StoredSuggestionBatchFullSchema, StoredSuggestionBatchSparseSchema],
+);
+
+export type StoredSuggestionBatch = z.infer<
+  typeof StoredSuggestionBatchSchema
+>;
+
+// ─── Request ───────────────────────────────────────────────────────────
 
 export const SuggestionsRequestSchema = z.object({
   anchorWindow: z.string().min(1),

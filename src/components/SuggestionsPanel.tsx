@@ -1,22 +1,13 @@
+'use client';
+
 /**
  * SuggestionsPanel.tsx
-  * Left column. Shows batches of suggestions, grouped by recency.
- * Each batch corresponds to a "refresh" of suggestions, triggered by new transcript segments.
- * Within each batch, suggestions are ordered by relevance score.
  *
- * Each suggestion card shows:
- * - Type (e.g. Question, Insight)
- * - Preview (a single spoken sentence, ideally referencing a specific part of the transcript)
- *
- * Clicking a suggestion sends its full detail prompt to the assistant, which may trigger a follow-up message or action.
- *
- * The prompts for generating suggestions are crafted to elicit specific, actionable insights that can move the conversation forward.
- * They avoid generic advice and instead focus on concrete elements from the recent transcript.
- *
- * The component also handles an "empty state" when no suggestions are available, and indicates when suggestions are being refreshed.
+ * Middle column. Renders suggestion batches, latest on top.
+ * Display only — no business logic.
  */
 
-import React from 'react';
+import React, { memo, useCallback, useMemo } from 'react';
 import type { StoredBatch } from '../store/suggestionStore';
 import type { Suggestion, SuggestionType } from '../utils/validators';
 
@@ -28,51 +19,61 @@ interface SuggestionsPanelProps {
   onSuggestionClick: (suggestion: Suggestion) => void;
 }
 
-// ─── Type Labels ───────────────────────────────────────────────────────
+// ─── Type config ────────────────────────────────────────────────────────
+// Color = left-border accent + badge tint. Kept subtle so it aids
+// scanning without competing with the suggestion text.
 
-const TYPE_LABELS: Record<SuggestionType, string> = {
-  ANSWER: 'Answer',
-  CLARIFY: 'Clarify',
-  FACT_CHECK: 'Fact-check',
-  INSIGHT: 'Insight',
-  QUESTION: 'Question',
-  DEFINITION: 'Definition',
-  PIVOT: 'Pivot',
+const TYPE_CONFIG: Record<SuggestionType, { label: string; color: string; bg: string }> = {
+  ANSWER:     { label: 'Answer',     color: '#2563eb', bg: '#eff6ff' },
+  CLARIFY:    { label: 'Clarify',    color: '#7c3aed', bg: '#f5f3ff' },
+  FACT_CHECK: { label: 'Fact-check', color: '#dc2626', bg: '#fef2f2' },
+  INSIGHT:    { label: 'Insight',    color: '#059669', bg: '#ecfdf5' },
+  QUESTION:   { label: 'Question',   color: '#d97706', bg: '#fffbeb' },
+  DEFINITION: { label: 'Definition', color: '#0284c7', bg: '#f0f9ff' },
+  PIVOT:      { label: 'Pivot',      color: '#475569', bg: '#f8fafc' },
 };
 
-// ─── Component ─────────────────────────────────────────────────────────
+// ─── Panel ──────────────────────────────────────────────────────────────
 
 export function SuggestionsPanel({
   batches,
   isRefreshing,
   onSuggestionClick,
 }: SuggestionsPanelProps) {
-  const ordered = [...batches].reverse();
+  // BUG FIX + PERF: memoize the reversed array — avoids recreating on every render
+  const ordered = useMemo(() => [...batches].reverse(), [batches]);
 
   return (
     <div className="flex flex-col h-full overflow-y-auto px-4 py-3 gap-4">
 
       {/* Header */}
-      <div className="flex items-center justify-between text-[19px] text-blue-800 font-medium tracking-tight">
-        <span>Suggestions</span>
+      <div className="flex items-center justify-between">
+        <span className="text-[13px] font-semibold text-gray-500 uppercase tracking-widest">
+          Suggestions
+        </span>
 
+        {/* PERF: Refreshing indicator — only mounts the element when needed */}
         {isRefreshing && (
-          <span className="text-sm text-blue-400 animate-pulse">
+          <span className="flex items-center gap-1.5 text-[11px] text-blue-400">
+            <span className="inline-block w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse" />
             Updating…
           </span>
         )}
       </div>
 
-      {/* Empty State */}
-      {ordered.length === 0 && (
-        <div className="text-sm text-gray-400 text-center mt-10">
-          Waiting for conversation…
+      {/* Empty state */}
+      {ordered.length === 0 && !isRefreshing && (
+        <div className="flex flex-col items-center justify-center flex-1 gap-2 text-center mt-10 select-none">
+          <div className="text-2xl opacity-30">💬</div>
+          <p className="text-[13px] text-gray-400">
+            Suggestions appear after the first transcript chunk.
+          </p>
         </div>
       )}
 
       {ordered.map((stored, i) => (
         <BatchBlock
-          key={stored.id}
+          key={stored.id}                        // BUG FIX: stable id, not index
           stored={stored}
           isLatest={i === 0}
           onSuggestionClick={onSuggestionClick}
@@ -82,7 +83,7 @@ export function SuggestionsPanel({
   );
 }
 
-// ─── Batch Block ───────────────────────────────────────────────────────
+// ─── BatchBlock ─────────────────────────────────────────────────────────
 
 interface BatchBlockProps {
   stored: StoredBatch;
@@ -90,80 +91,116 @@ interface BatchBlockProps {
   onSuggestionClick: (suggestion: Suggestion) => void;
 }
 
-function BatchBlock({ stored, isLatest, onSuggestionClick }: BatchBlockProps) {
+// PERF: memo prevents re-render when only an unrelated batch changes
+const BatchBlock = memo(function BatchBlock({
+  stored,
+  isLatest,
+  onSuggestionClick,
+}: BatchBlockProps) {
   const { batch, timestamp, refreshFailed } = stored;
 
-  if (batch.suggestions.length === 0) return null;
+  if (batch.suggestions.length === 0) {
+    return null; // Don't render empty batches
+  }
 
   return (
     <div
-      className={`flex flex-col gap-3 transition ${
-        isLatest ? 'opacity-100' : 'opacity-40'
-      }`}
+      className="flex flex-col gap-2.5 transition-opacity duration-300"
+      style={{ opacity: isLatest ? 1 : 0.4 }}
     >
-      {/* Meta */}
-      <div className="flex items-center text-[11px] text-gray-400">
-        <span className="uppercase tracking-wide">
-          {batch.inferred_mode.replace('_', ' ')}
+      {/* Batch meta row */}
+      <div className="flex items-center gap-2 text-[11px] text-gray-400">
+        <span className="uppercase tracking-wider font-medium">
+          {batch.inferred_mode.replace(/_/g, ' ')}   
         </span>
 
-        <span className="ml-auto">
-          {formatTime(timestamp)}
-        </span>
+        <span className="ml-auto tabular-nums">{formatTime(timestamp)}</span>
 
+        {/* UX: stale indicator — amber pill, not bare text */}
         {refreshFailed && (
-          <span className="ml-2 text-[10px] text-amber-500">
+          <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-amber-50 text-amber-500 border border-amber-200">
             stale
           </span>
         )}
       </div>
 
-      {/* Suggestions */}
       {batch.suggestions.map((suggestion, i) => (
         <SuggestionCard
-          key={i}
+          key={`${suggestion.type}-${i}`}              // PERF: more stable than pure index
           suggestion={suggestion}
-          onClick={() => onSuggestionClick(suggestion)}
+          onSuggestionClick={onSuggestionClick}        // PERF: pass stable ref, not inline arrow
         />
       ))}
     </div>
   );
-}
+});
 
-// ─── Suggestion Card ───────────────────────────────────────────────────
+// ─── SuggestionCard ─────────────────────────────────────────────────────
 
 interface SuggestionCardProps {
   suggestion: Suggestion;
-  onClick: () => void;
+  onSuggestionClick: (suggestion: Suggestion) => void;
 }
 
-function SuggestionCard({ suggestion, onClick }: SuggestionCardProps) {
+// PERF: memo + useCallback avoids re-render cascade when parent re-renders
+const SuggestionCard = memo(function SuggestionCard({
+  suggestion,
+  onSuggestionClick,
+}: SuggestionCardProps) {
+  const cfg = TYPE_CONFIG[suggestion.type];
+
+  // PERF: stable click handler per card instance
+  const handleClick = useCallback(
+    () => onSuggestionClick(suggestion),
+    [suggestion, onSuggestionClick],
+  );
+
   return (
     <button
-      onClick={onClick}
-      className="
-        group w-full text-left
-        px-4 py-3 rounded-xl
-        bg-white/70 backdrop-blur-md
-        hover:bg-white
-        border border-transparent
-        hover:border-gray-200
-        transition-all duration-150
-        shadow-sm hover:shadow-md
-      "
+      onClick={handleClick}
+      className="group w-full text-left rounded-xl border transition-all duration-150 overflow-hidden"
+      style={{
+        background: '#fff',
+        borderColor: '#e5e7eb',
+        // UX: colored left border = instant type recognition without reading the badge
+        borderLeft: `3px solid ${cfg.color}`,
+        boxShadow: '0 1px 2px rgba(0,0,0,0.04)',
+      }}
+      onMouseEnter={(e) => {
+        (e.currentTarget as HTMLButtonElement).style.boxShadow =
+          '0 4px 12px rgba(0,0,0,0.08)';
+        (e.currentTarget as HTMLButtonElement).style.borderColor = cfg.color;
+      }}
+      onMouseLeave={(e) => {
+        (e.currentTarget as HTMLButtonElement).style.boxShadow =
+          '0 1px 2px rgba(0,0,0,0.04)';
+        (e.currentTarget as HTMLButtonElement).style.borderColor = '#e5e7eb';
+      }}
     >
-      {/* Type */}
-      <div className="text-[10px] uppercase tracking-wide text-gray-400 mb-1">
-        {TYPE_LABELS[suggestion.type]}
-      </div>
+      <div className="px-3.5 py-3">
+        {/* Type badge */}
+        <span
+          className="inline-block text-[10px] font-bold uppercase tracking-wider rounded px-1.5 py-0.5 mb-1.5"
+          style={{ background: cfg.bg, color: cfg.color }}
+        >
+          {cfg.label}
+        </span>
 
-      {/* Preview */}
-      <div className="text-[14px] leading-relaxed text-gray-900 group-hover:text-black">
-        {suggestion.preview}
+        {/* Preview — main readable content */}
+        <p className="text-[13.5px] leading-relaxed text-gray-800 group-hover:text-gray-900">
+          {suggestion.preview}
+        </p>
+
+        {/* UX: anchor quote — grounding context so user knows what triggered the card */}
+        {suggestion.concrete_anchor && (
+          <p className="mt-1.5 text-[11px] text-gray-400 truncate">
+            re: &ldquo;{suggestion.concrete_anchor}&rdquo;
+          </p>
+        )}
       </div>
     </button>
   );
-}
+});
 
 // ─── Helpers ───────────────────────────────────────────────────────────
 

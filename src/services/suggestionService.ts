@@ -1,9 +1,3 @@
-/**
- * suggestionService.ts
- *
- * Pure async service — no store access, no side effects.
- */
-
 import {
   SuggestionResponseSchema,
   type SuggestionBatch,
@@ -19,186 +13,195 @@ import {
   type PromptContext,
 } from './suggestionPrompt';
 
-// ─── Types ────────────────────────────────────────
+// ───────────────────────────────────────────────────────────────────────
+// Types (STRICT DISCRIMINATED UNION)
+// ───────────────────────────────────────────────────────────────────────
 
-export interface SuggestionServiceInput {
+type SuccessResult = {
+  ok: true;
+  batch: SuggestionBatch;
+  retried: boolean;
+};
+
+type ErrorResult = {
+  ok: false;
+  reason: 'NETWORK' | 'GATE1' | 'GATE2';
+  detail: string;
+};
+
+type Result = SuccessResult | ErrorResult;
+
+// ───────────────────────────────────────────────────────────────────────
+// Normalize
+// ───────────────────────────────────────────────────────────────────────
+
+function normalizeBatch(batch: SuggestionBatch): SuggestionBatch {
+  if (batch.inferred_mode === 'INSUFFICIENT_CONTEXT') return batch;
+
+  return {
+    ...batch,
+    suggestions: batch.suggestions.slice(0, 3),
+  };
+}
+
+// ───────────────────────────────────────────────────────────────────────
+// Entry
+// ───────────────────────────────────────────────────────────────────────
+
+export async function fetchSuggestions(input: {
   anchorWindow: string;
   summaryWindow: string;
   timestamp: string;
-  contextWindowTokens?: number;
-}
-
-export type SuggestionServiceResult =
-  | { ok: true; batch: SuggestionBatch; retried: boolean }
-  | {
-      ok: false;
-      reason: 'GATE1_FAIL' | 'GATE2_FAIL' | 'NETWORK_ERROR';
-      detail: string;
-    };
-
-// ─── Entry ────────────────────────────────────────
-
-export async function fetchSuggestions(
-  input: SuggestionServiceInput,
-): Promise<SuggestionServiceResult> {
+  groqApiKey?: string;
+}): Promise<Result> {
   const context: PromptContext = {
-    summaryWindow: input.summaryWindow,
     anchorWindow: input.anchorWindow,
+    summaryWindow: input.summaryWindow,
     timestamp: input.timestamp,
   };
 
   let raw: string;
 
   try {
-    raw = await callSuggestionsAPI(context);
+    raw = await callAPI(context, undefined, input.groqApiKey);
   } catch (err) {
     return {
       ok: false,
-      reason: 'NETWORK_ERROR',
-      detail: err instanceof Error ? err.message : String(err),
+      reason: 'NETWORK',
+      detail: String(err),
     };
   }
 
-  // ── Gate 1
-  const gate1 = runGate1(raw);
+  const parsed = runGate1(raw);
 
-  if (!gate1.ok) {
-    return retryWithInstruction(context, 'GATE1');
+  if (!parsed.ok) {
+    return retry(context, input.groqApiKey);
   }
 
-  // ── Gate 2
-  const semantic = validateSemantics(gate1.batch);
+  // ✅ NOW SAFE — TS knows batch exists
+  const batch = parsed.batch;
+
+  if (batch.inferred_mode === 'INSUFFICIENT_CONTEXT') {
+    return { ok: true, batch, retried: false };
+  }
+
+  const semantic = validateSemantics(batch);
 
   if (!semantic.passed) {
-    const retryInstruction = buildRetryInstruction(semantic.failures);
-    return retryWithInstruction(context, 'GATE2', retryInstruction);
+    return retry(
+      context,
+      input.groqApiKey,
+      buildRetryInstruction(semantic.failures),
+    );
   }
 
-  return { ok: true, batch: gate1.batch, retried: false };
-}
-
-// ─── Retry ────────────────────────────────────────
-
-async function retryWithInstruction(
-  context: PromptContext,
-  failedGate: 'GATE1' | 'GATE2',
-  retryInstruction?: string,
-): Promise<SuggestionServiceResult> {
-  const instruction =
-    failedGate === 'GATE1'
-      ? '\n\nCRITICAL: Output ONLY valid JSON. No markdown. No explanation.'
-      : retryInstruction ?? '';
-
-  let raw: string;
-
-  try {
-    raw = await callSuggestionsAPI(context, instruction);
-  } catch (err) {
-    return {
-      ok: false,
-      reason: 'NETWORK_ERROR',
-      detail: err instanceof Error ? err.message : String(err),
-    };
-  }
-
-  const gate1 = runGate1(raw);
-
-  if (!gate1.ok) {
-    return {
-      ok: false,
-      reason: 'GATE1_FAIL',
-      detail: gate1.error,
-    };
-  }
-
-  const semantic = validateSemantics(gate1.batch);
-
-  if (!semantic.passed) {
-    return {
-      ok: false,
-      reason: 'GATE2_FAIL',
-      detail: semantic.failures.join(', '),
-    };
-  }
-
-  return { ok: true, batch: gate1.batch, retried: true };
-}
-
-// ─── Gate 1 (STRICT FIX) ──────────────────────────
-
-function runGate1(raw: string):
-  | { ok: true; batch: SuggestionBatch }
-  | { ok: false; error: string } {
-  const cleaned = raw
-    .replace(/^```json\s*/i, '')
-    .replace(/^```\s*/i, '')
-    .replace(/```\s*$/i, '')
-    .trim();
-
-  let parsed: unknown;
-
-  try {
-    parsed = JSON.parse(cleaned);
-  } catch (err) {
-    return {
-      ok: false,
-      error: `JSON parse failed: ${
-        err instanceof Error ? err.message : String(err)
-      }`,
-    };
-  }
-
-  const result = SuggestionResponseSchema.safeParse(parsed);
-
-  if (!result.success) {
-    return {
-      ok: false,
-      error: result.error.issues.map((i) => i.message).join('; '),
-    };
-  }
-
-  // ✅ CRITICAL: now guaranteed non-undefined
   return {
     ok: true,
-    batch: result.data,
+    batch: normalizeBatch(batch),
+    retried: false,
   };
 }
 
-// ─── API ──────────────────────────────────────────
+// ───────────────────────────────────────────────────────────────────────
+// Gate 1 (STRICT RETURN TYPE)
+// ───────────────────────────────────────────────────────────────────────
 
-async function callSuggestionsAPI(
+function runGate1(
+  raw: string,
+):
+  | { ok: true; batch: SuggestionBatch }
+  | { ok: false; error: string } {
+  try {
+    const parsed = JSON.parse(raw.trim());
+    const result = SuggestionResponseSchema.safeParse(parsed);
+
+    if (!result.success) {
+      return {
+        ok: false,
+        error: result.error.message,
+      };
+    }
+
+    return {
+      ok: true,
+      batch: result.data,
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      error: String(err),
+    };
+  }
+}
+
+// ───────────────────────────────────────────────────────────────────────
+// Retry
+// ───────────────────────────────────────────────────────────────────────
+
+async function retry(
+  context: PromptContext,
+  key?: string,
+  instruction?: string,
+): Promise<Result> {
+  try {
+    const raw = await callAPI(context, instruction, key);
+    const parsed = runGate1(raw);
+
+    if (!parsed.ok) {
+      return {
+        ok: false,
+        reason: 'GATE1',
+        detail: parsed.error,
+      };
+    }
+
+    return {
+      ok: true,
+      batch: normalizeBatch(parsed.batch),
+      retried: true,
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      reason: 'NETWORK',
+      detail: String(err),
+    };
+  }
+}
+
+// ───────────────────────────────────────────────────────────────────────
+// API
+// ───────────────────────────────────────────────────────────────────────
+
+async function callAPI(
   context: PromptContext,
   retryInstruction?: string,
+  groqApiKey?: string,
 ): Promise<string> {
   const { systemPrompt, userPrompt } = buildSuggestionPrompt(
     context,
     retryInstruction,
   );
 
-  const response = await fetch('/api/suggestions', {
+  const res = await fetch('/api/suggestions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       systemPrompt,
       userPrompt,
+      ...(groqApiKey ? { groqApiKey } : {}),
     }),
   });
 
-  if (!response.ok) {
-    const errText = await response.text().catch(() => 'unknown error');
-    throw new Error(`/api/suggestions ${response.status}: ${errText}`);
+  if (!res.ok) {
+    throw new Error(await res.text());
   }
 
-  const data: unknown = await response.json();
+  const data = await res.json();
 
-  if (
-    !data ||
-    typeof data !== 'object' ||
-    !('content' in data) ||
-    typeof (data as Record<string, unknown>).content !== 'string'
-  ) {
-    throw new Error('Invalid /api/suggestions response shape');
+  if (!data || typeof data.content !== 'string') {
+    throw new Error('Invalid API response shape');
   }
 
-  return (data as Record<string, string>).content;
+  return data.content;
 }

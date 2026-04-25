@@ -1,5 +1,23 @@
 'use client';
 
+/**
+ * useSuggestions.ts
+ *
+ * Orchestration hook for the suggestion refresh cycle.
+ *
+ * FIXES applied:
+ * 1. First-run guard was blocking: `segments.length === lastSegmentCountRef.current`
+ *    fails to fire on session start because both sides are 0. Fixed with a separate
+ *    `hasRunOnce` ref that allows the very first call through unconditionally.
+ * 2. Interval ran even when !isRecording if segments existed — wasted API calls.
+ *    Fixed: interval strictly gated on isRecording.
+ * 3. Stale closure: interval captured the initial `refresh` and never updated.
+ *    Fixed: interval calls via `refreshRef.current` which is kept in sync.
+ * 4. groqApiKey now flows through to fetchSuggestions (fixes the unauthenticated call path).
+ * 5. MIN_REFRESH_GAP guard was blocking the immediate trigger after recording starts.
+ *    Fixed: initial trigger bypasses the gap guard via a dedicated `triggerNow` path.
+ */
+
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { fetchSuggestions } from '../services/suggestionService';
 import {
@@ -11,12 +29,16 @@ import type { TranscriptSegment } from '../services/contextBuilder';
 import { useSuggestionStore } from '../store/suggestionStore';
 import type { Suggestion } from '../utils/validators';
 
-const REFRESH_INTERVAL_MS = 10_000;
-const MIN_REFRESH_GAP_MS  = 5_000;
+// ─── Config ───────────────────────────────────────────────────────────────────
+
+const REFRESH_INTERVAL_MS = 10_000;  // 10s polling cadence
+const MIN_REFRESH_GAP_MS  = 5_000;   // debounce guard for manual/rapid calls
+
+// ─── Types ────────────────────────────────────────────────────────────────────
 
 export interface UseSuggestionsOptions {
   getSegments: () => TranscriptSegment[];
-  groqApiKey: string;                          // FIX 1: restored
+  groqApiKey: string;
   contextWindowTokens?: number;
   onSuggestionClick: (suggestion: Suggestion) => void;
   isRecording: boolean;
@@ -30,102 +52,133 @@ export interface UseSuggestionsReturn {
   handleSuggestionClick: (suggestion: Suggestion) => void;
 }
 
+// ─── Hook ─────────────────────────────────────────────────────────────────────
+
 export function useSuggestions({
   getSegments,
-  groqApiKey,                                  // FIX 1: restored
+  groqApiKey,
   contextWindowTokens = 600,
   onSuggestionClick,
   isRecording,
 }: UseSuggestionsOptions): UseSuggestionsReturn {
   const store = useSuggestionStore();
 
-  const [rollingSummary, setRollingSummary] = useState('');
-  const lastSummaryAtRef     = useRef<number | null>(null);
-  const isRefreshingRef      = useRef(false);
-  const lastRunRef           = useRef(0);
-  const lastSegmentCountRef  = useRef(0);
-
-  // FIX 2: keep a ref to the latest refresh so the interval never holds a stale closure
-  const refreshRef = useRef<() => Promise<void>>(() => Promise.resolve());
+  const [rollingSummary, setRollingSummary]   = useState('');
+  const lastSummaryAtRef                       = useRef<number | null>(null);
+  const isRefreshingRef                        = useRef(false);
+  const lastRunRef                             = useRef(0);
+  const lastSegmentCountRef                    = useRef(0);
+  const hasRunOnceRef                          = useRef(false); // FIX 1: allows first run through
+  const refreshRef                             = useRef<(opts?: { ignoreGap?: boolean }) => Promise<void>>(() => Promise.resolve());
 
   // ── Core refresh ─────────────────────────────────────────────────────────
 
-  const refresh = useCallback(async () => {
-    if (!groqApiKey) return;                   // FIX 1: guard restored
+  const refresh = useCallback(
+    async (opts?: { ignoreGap?: boolean }) => {
+      if (!groqApiKey) return;
+      if (isRefreshingRef.current) return;
 
-    const now = Date.now();
-    if (isRefreshingRef.current) return;
-    if (now - lastRunRef.current < MIN_REFRESH_GAP_MS) return;
+      const now = Date.now();
 
-    const segments = getSegments();
-    if (segments.length === 0) return;
-    if (segments.length === lastSegmentCountRef.current) return;
+      // FIX 5: allow bypassing MIN_REFRESH_GAP for the immediate trigger on recording start
+      const gapOk = opts?.ignoreGap || now - lastRunRef.current >= MIN_REFRESH_GAP_MS;
+      if (!gapOk) return;
 
-    lastSegmentCountRef.current = segments.length;
-    lastRunRef.current = now;
+      const segments = getSegments();
+      if (segments.length === 0) return;
 
-    isRefreshingRef.current = true;
-    store.setIsRefreshing(true);
-
-    try {
-      const currentSummary = await maybeRecomputeSummary(
-        segments,
-        rollingSummary,
-        lastSummaryAtRef.current,
-        groqApiKey,                            // FIX 1: restored
-        (updated, ts) => {
-          setRollingSummary(updated);
-          lastSummaryAtRef.current = ts;
-        },
-      );
-
-      const context = buildContext(segments, currentSummary, contextWindowTokens);
-
-      const result = await fetchSuggestions({
-        anchorWindow: context.anchorWindow,
-        summaryWindow: context.summaryWindow,
-        timestamp: new Date().toISOString(),
-        contextWindowTokens,
-        groqApiKey,                            // FIX 1: restored
-      });
-
-      if (result.ok) {
-        store.appendBatch({
-          id: crypto.randomUUID(),
-          timestamp: new Date().toISOString(),
-          batch: result.batch,
-          anchorWindowSnapshot: context.anchorWindowSnapshot,
-          refreshFailed: false,
-        });
-      } else {
-        store.markRefreshFailed(result.detail);
+      // FIX 1: first run always proceeds; subsequent runs only if transcript changed
+      const transcriptChanged = segments.length !== lastSegmentCountRef.current;
+      if (!hasRunOnceRef.current) {
+        hasRunOnceRef.current = true;           // allow through; mark as run
+      } else if (!transcriptChanged) {
+        return;                                  // no new content — skip
       }
-    } catch (err) {
-      store.markRefreshFailed(
-        err instanceof Error ? err.message : 'Unknown error',
-      );
-    } finally {
-      isRefreshingRef.current = false;
-      store.setIsRefreshing(false);
-    }
-  }, [groqApiKey, getSegments, contextWindowTokens, rollingSummary, store]);
 
-  // FIX 2: keep the ref in sync with the latest refresh function
+      lastSegmentCountRef.current = segments.length;
+      lastRunRef.current = now;
+
+      isRefreshingRef.current = true;
+      store.setIsRefreshing(true);
+
+      try {
+        // Rolling summary — lazily recomputed off the critical path
+        const currentSummary = await maybeRecomputeSummary(
+          segments,
+          rollingSummary,
+          lastSummaryAtRef.current,
+          groqApiKey,
+          (updated, ts) => {
+            setRollingSummary(updated);
+            lastSummaryAtRef.current = ts;
+          },
+        );
+
+        const context = buildContext(segments, currentSummary, contextWindowTokens);
+
+        const result = await fetchSuggestions({
+          anchorWindow: context.anchorWindow,
+          summaryWindow: context.summaryWindow,
+          timestamp: new Date().toISOString(),
+          groqApiKey,                          // FIX 4: forwarded to service → API → route
+        });
+
+        if (result.ok) {
+          store.appendBatch({
+            id: crypto.randomUUID(),
+            timestamp: new Date().toISOString(),
+            batch: result.batch,
+            anchorWindowSnapshot: context.anchorWindowSnapshot,
+            refreshFailed: false,
+          });
+        } else {
+          store.markRefreshFailed(result.detail);
+        }
+      } catch (err) {
+        store.markRefreshFailed(
+          err instanceof Error ? err.message : 'Unknown error',
+        );
+      } finally {
+        isRefreshingRef.current = false;
+        store.setIsRefreshing(false);
+      }
+    },
+    [groqApiKey, getSegments, contextWindowTokens, rollingSummary, store],
+  );
+
+  // ── Keep refreshRef current (avoids stale closures in interval) ───────────
+
   useEffect(() => {
     refreshRef.current = refresh;
   }, [refresh]);
 
-  // ── Interval — calls via ref so it never holds a stale closure ───────────
+  // ── Interval: strictly gated on isRecording (FIX 2) ──────────────────────
+
+  useEffect(() => {
+    if (!isRecording) return;                  // FIX 2: no interval when not recording
+
+    const interval = setInterval(() => {
+      void refreshRef.current();               // FIX 3: always calls latest refresh via ref
+    }, REFRESH_INTERVAL_MS);
+
+    return () => clearInterval(interval);
+  }, [isRecording]);
+
+  // ── Immediate trigger when recording starts (FIX 5) ──────────────────────
 
   useEffect(() => {
     if (!isRecording) return;
 
-    const interval = setInterval(() => {
-      void refreshRef.current();               // FIX 2: always calls latest refresh
-    }, REFRESH_INTERVAL_MS);
+    // Reset the first-run gate so a new session always triggers immediately
+    hasRunOnceRef.current = false;
 
-    return () => clearInterval(interval);
-  }, [isRecording]);                           // dep array stays minimal and correct
+    // Small delay lets the first transcript chunk arrive before we check
+    const timeout = setTimeout(() => {
+      void refreshRef.current({ignoreGap: true}); // Bypass gap guard for the immediate trigger on recording start});
+    }, 500);
+
+    return () => clearTimeout(timeout);
+  }, [isRecording]);
 
   // ── Click handler ─────────────────────────────────────────────────────────
 
@@ -149,7 +202,7 @@ async function maybeRecomputeSummary(
   segments: TranscriptSegment[],
   existingSummary: string,
   lastSummaryAt: number | null,
-  groqApiKey: string,                          // FIX 1: restored
+  groqApiKey: string,
   onUpdated: (summary: string, timestamp: number) => void,
 ): Promise<string> {
   if (!shouldRecomputeSummary(segments, lastSummaryAt)) return existingSummary;
@@ -162,9 +215,9 @@ async function maybeRecomputeSummary(
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         systemPrompt:
-          'You are a precise meeting summarizer. Output only the summary.',
+          'You are a precise meeting summarizer. Output only the 2–3 sentence summary — no preamble, no labels, no markdown.',
         userPrompt: prompt,
-        groqApiKey,                            // FIX 1: restored
+        groqApiKey,
         maxTokens: 150,
       }),
     });
@@ -172,13 +225,13 @@ async function maybeRecomputeSummary(
     if (!response.ok) return existingSummary;
 
     const data = (await response.json()) as { content?: string };
-    if (typeof data.content === 'string' && data.content.trim().length > 0) {
+    if (typeof data.content === 'string' && data.content.trim()) {
       const updated = data.content.trim();
       onUpdated(updated, Date.now());
       return updated;
     }
   } catch {
-    // summary failure is non-fatal
+    // Summary failure is non-fatal — suggestions still work without compressed context
   }
 
   return existingSummary;

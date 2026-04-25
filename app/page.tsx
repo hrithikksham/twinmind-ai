@@ -44,6 +44,7 @@ export default function Page() {
 
   const { isRefreshing, handleSuggestionClick } = useSuggestions({
     getSegments,
+    groqApiKey,
     contextWindowTokens,
     onSuggestionClick: sendSuggestion,
     isRecording,

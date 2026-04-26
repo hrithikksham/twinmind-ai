@@ -17,31 +17,42 @@ import { useSettingsStore } from '@/store/settingsStore';
 import SettingsModal from '@/components/SettingsModal';
 
 export default function Page() {
-  // ─── State ─────────────────────────────
+  // ─── Local State ─────────────────────────────
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
 
-  // ─── Stores ────────────────────────────
+  // ─── Stores (React-bound for UI rendering) ───
   const segments = useTranscriptStore((s) => s.segments);
   const batches = useSuggestionStore((s) => s.allBatches);
+
   const groqApiKey = useSettingsStore((s) => s.groqApiKey);
   const contextWindowTokens = useSettingsStore((s) => s.contextWindowTokens);
 
-  // ─── Derived ───────────────────────────
-  const getSegments = useCallback(() => segments, [segments]);
+  // ─────────────────────────────────────────────
+  // ✅ CRITICAL FIX: Use LIVE store access (no stale closure)
+  // ─────────────────────────────────────────────
+  const getSegments = useCallback(() => {
+    return useTranscriptStore.getState().segments;
+  }, []);
 
-  const getTranscript = useCallback(
-    () => segments.map((seg) => `[${seg.ts}] ${seg.text}`).join('\n'),
-    [segments],
-  );
+  // ─── Transcript builder ──────────────────────
+  const getTranscript = useCallback(() => {
+    const currentSegments = useTranscriptStore.getState().segments;
 
-  // ─── Hooks ─────────────────────────────
+    return currentSegments
+      .map((seg) => `[${seg.ts}] ${seg.text}`)
+      .join('\n');
+  }, []);
+
+  // ─── Chat Hook ───────────────────────────────
   const { messages, isLoading, sendMessage, sendSuggestion } = useChat({
     getTranscript,
     groqApiKey,
   });
 
+  // ─── Mic Recorder ────────────────────────────
   const { isRecording, start, stop } = useMicRecorder();
 
+  // ─── Suggestions Hook ────────────────────────
   const { isRefreshing, handleSuggestionClick } = useSuggestions({
     getSegments,
     groqApiKey,
@@ -50,23 +61,37 @@ export default function Page() {
     isRecording,
   });
 
+  // ─── Debug (optional, remove later) ──────────
+  console.log('[PAGE]', {
+    segments: segments.length,
+    isRecording,
+    batches: batches.length,
+  });
+
   return (
-    <div className="h-screen flex flex-col bg-[#dfdfdf] text-gray-900 ">
+    <div className="h-screen flex flex-col bg-[#dfdfdf] text-gray-900">
       
       {/* ─── Header ───────────────────────── */}
-      <header className="flex items-center justify-between px-6 py-3 backdrop-blur-md bg-white/100 border-b border-gray-200 rounded-xl shadow-lg overflow-hidden">
+      <header className="flex items-center justify-between px-6 py-3 bg-white border-b border-gray-200 shadow-sm">
         
-        {/* Title */}
-        <h1 className="text-[28px] font-semibold tracking-tight">
+        <h1 className="text-[24px] font-semibold tracking-tight">
           TwinMind
         </h1>
+
+        {/* Settings Button (you were missing this) */}
+        <button
+          onClick={() => setIsSettingsOpen(true)}
+          className="text-sm text-gray-600 hover:text-gray-900"
+        >
+          Settings
+        </button>
       </header>
 
       {/* ─── Main Layout ───────────────────── */}
       <div className="flex flex-1 gap-4 p-4 overflow-hidden">
 
         {/* Transcript */}
-        <div className="flex-[0.9] bg-white/100 backdrop-blur-md rounded-2xl shadow-sm overflow-hidden">
+        <div className="flex-[0.9] bg-white rounded-2xl shadow-sm overflow-hidden">
           <TranscriptPanel
             segments={segments}
             isRecording={isRecording}
@@ -76,7 +101,7 @@ export default function Page() {
         </div>
 
         {/* Suggestions */}
-        <div className="flex-[1.1] bg-white/80 backdrop-blur-md rounded-2xl shadow-sm overflow-hidden">
+        <div className="flex-[1.1] bg-white rounded-2xl shadow-sm overflow-hidden">
           <SuggestionsPanel
             batches={batches}
             isRefreshing={isRefreshing}
@@ -85,7 +110,7 @@ export default function Page() {
         </div>
 
         {/* Chat */}
-        <div className="flex-[1.1] bg-white/80 backdrop-blur-md rounded-2xl shadow-sm overflow-hidden">
+        <div className="flex-[1.1] bg-white rounded-2xl shadow-sm overflow-hidden">
           <ChatPanel
             messages={messages}
             isLoading={isLoading}

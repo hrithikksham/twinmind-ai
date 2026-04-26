@@ -1,10 +1,3 @@
-/**
- * /api/transcribe/route.ts
- *
- * Accepts an audio file, forwards to Groq Whisper Large V3,
- * returns transcript text.
- */
-
 import { NextRequest, NextResponse } from 'next/server';
 
 const GROQ_TRANSCRIPTION_URL =
@@ -12,8 +5,10 @@ const GROQ_TRANSCRIPTION_URL =
 
 const WHISPER_MODEL = 'whisper-large-v3';
 
+// Minimum viable audio size (~15KB)
+const MIN_AUDIO_BYTES = 15_000;
+
 export async function POST(req: NextRequest): Promise<NextResponse> {
-  // ─── Parse multipart form ──────────────────────────────────────────────
   let formData: FormData;
 
   try {
@@ -25,23 +20,35 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     );
   }
 
-  // ─── Debug (remove later) ──────────────────────────────────────────────
-  console.log('FORM KEYS:', Array.from(formData.keys()));
-
-  // ─── Get audio file ────────────────────────────────────────────────────
   const audioFile = formData.get('file');
 
   if (!audioFile || typeof audioFile === 'string') {
     return NextResponse.json(
+      { error: 'Missing or invalid audio file' },
+      { status: 400 }
+    );
+  }
+
+  // 🔥 CRITICAL: validate file
+  if (audioFile.size < MIN_AUDIO_BYTES) {
+    return NextResponse.json(
       {
-        error: 'Missing or invalid audio file',
-        keys: Array.from(formData.keys()),
+        error: `Audio too small (${audioFile.size} bytes)`,
       },
       { status: 400 }
     );
   }
 
-  // ─── Resolve API key ───────────────────────────────────────────────────
+  if (!audioFile.type.includes('audio')) {
+    return NextResponse.json(
+      {
+        error: `Invalid MIME type: ${audioFile.type}`,
+      },
+      { status: 400 }
+    );
+  }
+
+  // ─── API key ─────────────────────────────
   const clientKey = formData.get('groqApiKey');
 
   const apiKey =
@@ -55,11 +62,15 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     );
   }
 
-  // ─── Build Groq request ────────────────────────────────────────────────
-  const groqForm = new FormData();
+  // ─── Normalize file (IMPORTANT) ──────────
+  const normalizedFile = new File(
+    [audioFile],
+    'audio.webm', // force extension
+    { type: audioFile.type || 'audio/webm' }
+  );
 
-  // ✅ FIX: pass file directly (no casting, no renaming)
-  groqForm.append('file', audioFile);
+  const groqForm = new FormData();
+  groqForm.append('file', normalizedFile);
   groqForm.append('model', WHISPER_MODEL);
   groqForm.append('response_format', 'json');
 
@@ -85,29 +96,16 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   }
 
   if (!groqRes.ok) {
-  const detail = await groqRes.text().catch(() => 'unknown');
-
-  console.error('GROQ ERROR:', groqRes.status, detail);
-
-  return NextResponse.json(
-    { error: `Groq Whisper error ${groqRes.status}: ${detail}` },
-    { status: groqRes.status }
-  );
-}
-
-  // ─── Handle API error ──────────────────────────────────────────────────
-  if (!groqRes.ok) {
     const detail = await groqRes.text().catch(() => 'unknown');
 
+    console.error('GROQ ERROR:', groqRes.status, detail);
+
     return NextResponse.json(
-      {
-        error: `Groq Whisper error ${groqRes.status}: ${detail}`,
-      },
+      { error: `Groq Whisper error ${groqRes.status}: ${detail}` },
       { status: groqRes.status }
     );
   }
 
-  // ─── Parse response ────────────────────────────────────────────────────
   let data: unknown;
 
   try {

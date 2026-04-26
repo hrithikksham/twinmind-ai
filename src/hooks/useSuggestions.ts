@@ -5,20 +5,21 @@
  *
  * Orchestration hook for the suggestion refresh cycle.
  *
- * FIXES applied:
- * 1. First-run guard was blocking: `segments.length === lastSegmentCountRef.current`
- *    fails to fire on session start because both sides are 0. Fixed with a separate
- *    `hasRunOnce` ref that allows the very first call through unconditionally.
- * 2. Interval ran even when !isRecording if segments existed — wasted API calls.
- *    Fixed: interval strictly gated on isRecording.
- * 3. Stale closure: interval captured the initial `refresh` and never updated.
- *    Fixed: interval calls via `refreshRef.current` which is kept in sync.
- * 4. groqApiKey now flows through to fetchSuggestions (fixes the unauthenticated call path).
- * 5. MIN_REFRESH_GAP guard was blocking the immediate trigger after recording starts.
- *    Fixed: initial trigger bypasses the gap guard via a dedicated `triggerNow` path.
+ * Key invariants maintained:
+ *  1. First run always fires once recording starts + segments exist.
+ *  2. Interval is strictly gated on isRecording — no wasted calls when idle.
+ *  3. No stale closures:
+ *     - refreshRef.current always points to the latest `refresh` instance.
+ *     - rollingSummary is stored in a ref, not useState, so it never enters
+ *       the useCallback dep array and never triggers a stale snapshot.
+ *  4. Stable Zustand actions (appendBatch, markRefreshFailed, setIsRefreshing)
+ *     are destructured from the store — these are stable function references
+ *     and safe to include in dep arrays without causing re-creation churn.
+ *  5. Retry / error handling never leaves the system in a permanently blocked
+ *     state: isRefreshingRef is always reset in the finally block.
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 import { fetchSuggestions } from '../services/suggestionService';
 import {
   buildContext,
@@ -31,14 +32,17 @@ import type { Suggestion } from '../utils/validators';
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
-const REFRESH_INTERVAL_MS = 10_000;  // 10s polling cadence
-const MIN_REFRESH_GAP_MS  = 5_000;   // debounce guard for manual/rapid calls
+const REFRESH_INTERVAL_MS = 10_000; // polling cadence while recording
+const MIN_REFRESH_GAP_MS  = 5_000;  // debounce guard for rapid/manual calls
 
-// ─── Types ────────────────────────────────────────────────────────────────────
+// ─── Public API ───────────────────────────────────────────────────────────────
 
 export interface UseSuggestionsOptions {
   getSegments: () => TranscriptSegment[];
-  groqApiKey: string;
+  // Optional — when absent the route uses the server-side GROQ_API_KEY env var.
+  // Do NOT gate the refresh cycle on this being present; transcription works
+  // without a client key and suggestions should behave the same way.
+  groqApiKey?: string;
   contextWindowTokens?: number;
   onSuggestionClick: (suggestion: Suggestion) => void;
   isRecording: boolean;
@@ -56,131 +60,167 @@ export interface UseSuggestionsReturn {
 
 export function useSuggestions({
   getSegments,
-  groqApiKey,
+  groqApiKey = '',
   contextWindowTokens = 600,
   onSuggestionClick,
   isRecording,
 }: UseSuggestionsOptions): UseSuggestionsReturn {
-  const store = useSuggestionStore();
+  // Destructure only the stable action references from the store.
+  // Zustand guarantees these function identities never change across renders,
+  // so they are safe in useCallback dep arrays without causing churn.
+  const {
+    currentBatch,
+    isRefreshing,
+    lastRefreshError,
+    appendBatch,
+    markRefreshFailed,
+    setIsRefreshing,
+  } = useSuggestionStore();
 
-  const [rollingSummary, setRollingSummary]   = useState('');
-  const lastSummaryAtRef                       = useRef<number | null>(null);
-  const isRefreshingRef                        = useRef(false);
-  const lastRunRef                             = useRef(0);
-  const lastSegmentCountRef                    = useRef(0);
-  const hasRunOnceRef                          = useRef(false); // FIX 1: allows first run through
-  const refreshRef                             = useRef<(opts?: { ignoreGap?: boolean }) => Promise<void>>(() => Promise.resolve());
+  // ── In-flight / timing refs ────────────────────────────────────────────────
+  const isRefreshingRef    = useRef(false);   // synchronous guard (vs async store flag)
+  const lastRunRef         = useRef(0);
+  const lastSegmentCountRef = useRef(0);
+  const hasRunOnceRef      = useRef(false);   // guarantees first run on new session
 
-  // ── Core refresh ─────────────────────────────────────────────────────────
+  // ── Rolling summary — stored as a ref to avoid dep array churn ─────────────
+  // If this were useState, `refresh` would depend on `rollingSummary`, causing
+  // a new refresh function on every summary update and a stale value read when
+  // the closure captures an old copy.
+  const rollingSummaryRef = useRef('');
+  const lastSummaryAtRef  = useRef<number | null>(null);
+
+  // ── Stable ref to latest refresh — prevents stale closures in setInterval ──
+  const refreshRef = useRef<(opts?: { ignoreGap?: boolean }) => Promise<void>>(
+    () => Promise.resolve(),
+  );
+
+  // ── Core refresh ──────────────────────────────────────────────────────────────
 
   const refresh = useCallback(
     async (opts?: { ignoreGap?: boolean }) => {
-      if (!groqApiKey) return;
+      // Allow empty key — server will fallback to env key
+      if (!groqApiKey) {
+        console.warn('[suggestions] No client API key — using server fallback');
+      }
       if (isRefreshingRef.current) return;
-
+      console.log('[suggestions] refresh fired', {
+      isRecording,
+      segmentCount: getSegments().length,
+      });
       const now = Date.now();
-
-      // FIX 5: allow bypassing MIN_REFRESH_GAP for the immediate trigger on recording start
-      const gapOk = opts?.ignoreGap || now - lastRunRef.current >= MIN_REFRESH_GAP_MS;
+      const gapOk =
+        opts?.ignoreGap === true || now - lastRunRef.current >= MIN_REFRESH_GAP_MS;
       if (!gapOk) return;
 
       const segments = getSegments();
-      if (segments.length === 0) return;
+      if (segments.length === 0) {
+        markRefreshFailed('No transcript yet');
+        return;
+      }
 
-      // FIX 1: first run always proceeds; subsequent runs only if transcript changed
+      // First-run gate: let the very first call through unconditionally,
+      // then require the transcript to have grown before re-running.
       const transcriptChanged = segments.length !== lastSegmentCountRef.current;
       if (!hasRunOnceRef.current) {
-        hasRunOnceRef.current = true;           // allow through; mark as run
+        hasRunOnceRef.current = true;
       } else if (!transcriptChanged) {
-        return;                                  // no new content — skip
+        return;
       }
 
       lastSegmentCountRef.current = segments.length;
       lastRunRef.current = now;
-
       isRefreshingRef.current = true;
-      store.setIsRefreshing(true);
+      setIsRefreshing(true);
 
       try {
-        // Rolling summary — lazily recomputed off the critical path
-        const currentSummary = await maybeRecomputeSummary(
+        // Rolling summary update — uses ref value, writes back to ref.
+        // Non-fatal: if the summary call fails we continue with the existing one.
+        rollingSummaryRef.current = await maybeRecomputeSummary(
           segments,
-          rollingSummary,
+          rollingSummaryRef.current,
           lastSummaryAtRef.current,
           groqApiKey,
           (updated, ts) => {
-            setRollingSummary(updated);
-            lastSummaryAtRef.current = ts;
+            rollingSummaryRef.current = updated;
+            lastSummaryAtRef.current  = ts;
           },
         );
 
-        const context = buildContext(segments, currentSummary, contextWindowTokens);
+        const context = buildContext(
+          segments,
+          rollingSummaryRef.current,
+          contextWindowTokens,
+        );
 
         const result = await fetchSuggestions({
-          anchorWindow: context.anchorWindow,
+          anchorWindow:  context.anchorWindow,
           summaryWindow: context.summaryWindow,
-          timestamp: new Date().toISOString(),
-          groqApiKey,                          // FIX 4: forwarded to service → API → route
+          timestamp:     new Date().toISOString(),
+          groqApiKey,
         });
 
         if (result.ok) {
-          store.appendBatch({
-            id: crypto.randomUUID(),
-            timestamp: new Date().toISOString(),
-            batch: result.batch,
+          appendBatch({
+            id:                   crypto.randomUUID(),
+            timestamp:            new Date().toISOString(),
+            batch:                result.batch,
             anchorWindowSnapshot: context.anchorWindowSnapshot,
-            refreshFailed: false,
+            refreshFailed:        false,
           });
         } else {
-          store.markRefreshFailed(result.detail);
+          markRefreshFailed(result.detail);
         }
       } catch (err) {
-        store.markRefreshFailed(
-          err instanceof Error ? err.message : 'Unknown error',
-        );
+        markRefreshFailed(err instanceof Error ? err.message : 'Unknown error');
       } finally {
         isRefreshingRef.current = false;
-        store.setIsRefreshing(false);
+        setIsRefreshing(false);
       }
     },
-    [groqApiKey, getSegments, contextWindowTokens, rollingSummary, store],
+    // Only primitive/stable deps here — no rollingSummary state variable.
+    // groqApiKey and contextWindowTokens change only when the user edits settings.
+    // getSegments should be memoized by the caller (useCallback).
+    [groqApiKey, contextWindowTokens, getSegments, appendBatch, markRefreshFailed, setIsRefreshing],
   );
 
-  // ── Keep refreshRef current (avoids stale closures in interval) ───────────
+  // ── Keep refreshRef in sync (prevents stale closure in setInterval) ──────────
 
   useEffect(() => {
     refreshRef.current = refresh;
   }, [refresh]);
 
-  // ── Interval: strictly gated on isRecording (FIX 2) ──────────────────────
-
-  useEffect(() => {
-    if (!isRecording) return;                  // FIX 2: no interval when not recording
-
-    const interval = setInterval(() => {
-      void refreshRef.current();               // FIX 3: always calls latest refresh via ref
-    }, REFRESH_INTERVAL_MS);
-
-    return () => clearInterval(interval);
-  }, [isRecording]);
-
-  // ── Immediate trigger when recording starts (FIX 5) ──────────────────────
+  // ── Polling interval — only active while recording ───────────────────────────
 
   useEffect(() => {
     if (!isRecording) return;
 
-    // Reset the first-run gate so a new session always triggers immediately
-    hasRunOnceRef.current = false;
+    const id = setInterval(() => {
+      // Always call via ref — captures the latest refresh after any re-creation
+      void refreshRef.current();
+    }, REFRESH_INTERVAL_MS);
 
-    // Small delay lets the first transcript chunk arrive before we check
-    const timeout = setTimeout(() => {
-      void refreshRef.current({ignoreGap: true}); // Bypass gap guard for the immediate trigger on recording start});
-    }, 500);
-
-    return () => clearTimeout(timeout);
+    return () => clearInterval(id);
   }, [isRecording]);
 
-  // ── Click handler ─────────────────────────────────────────────────────────
+  // ── Immediate trigger when recording starts ───────────────────────────────────
+  // Resets the first-run gate so a new session fires immediately rather than
+  // waiting for the first 10-second tick.
+
+  useEffect(() => {
+    if (!isRecording) return;
+
+    hasRunOnceRef.current = false;
+
+    // Small delay to let the first transcript chunk arrive
+    const id = setTimeout(() => {
+      void refreshRef.current({ ignoreGap: true });
+    }, 500);
+
+    return () => clearTimeout(id);
+  }, [isRecording]);
+
+  // ── Click passthrough ─────────────────────────────────────────────────────────
 
   const handleSuggestionClick = useCallback(
     (suggestion: Suggestion) => onSuggestionClick(suggestion),
@@ -188,15 +228,17 @@ export function useSuggestions({
   );
 
   return {
-    currentBatch:     store.currentBatch,
-    isRefreshing:     store.isRefreshing,
-    lastRefreshError: store.lastRefreshError,
-    manualRefresh:    refresh,
+    currentBatch,
+    isRefreshing,
+    lastRefreshError,
+    manualRefresh: refresh,
     handleSuggestionClick,
   };
 }
 
 // ─── Rolling summary helper ───────────────────────────────────────────────────
+// Intentionally a module-level async function (not a hook) — it has no React
+// dependencies and is easier to test in isolation.
 
 async function maybeRecomputeSummary(
   segments: TranscriptSegment[],
@@ -215,7 +257,8 @@ async function maybeRecomputeSummary(
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         systemPrompt:
-          'You are a precise meeting summarizer. Output only the 2–3 sentence summary — no preamble, no labels, no markdown.',
+          'You are a precise meeting summarizer. ' +
+          'Output only the 2–3 sentence summary — no preamble, no labels, no markdown.',
         userPrompt: prompt,
         groqApiKey,
         maxTokens: 150,
@@ -231,7 +274,7 @@ async function maybeRecomputeSummary(
       return updated;
     }
   } catch {
-    // Summary failure is non-fatal — suggestions still work without compressed context
+    // Summary failure is non-fatal — suggestions still work without compression
   }
 
   return existingSummary;

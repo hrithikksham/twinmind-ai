@@ -14,27 +14,29 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
 
+// ─── Constants ────────────────────────────────────────────────────────────────
+
+const GROQ_MODEL    = 'llama-3.3-70b-versatile';
+const GROQ_API_BASE = 'https://api.groq.com/openai/v1';
+
 // ─── Request schema ───────────────────────────────────────────────────────────
 
 const RequestSchema = z.object({
   systemPrompt: z.string().min(1),
-  userPrompt: z.string().min(1),
-  // Client may pass its own key (from settingsStore override); server key is fallback
-  groqApiKey: z.string().optional(),
-  maxTokens: z.number().int().positive().default(1024),
+  userPrompt:   z.string().min(1),
+  // Client may pass its own key (from settingsStore override); server key takes precedence.
+  groqApiKey:  z.string().optional(),
+  maxTokens:   z.number().int().positive().default(1024),
+  // When true, sets response_format: { type: 'json_object' } on the Groq request.
+  // Prevents code-fence wrapping at the source — eliminates the most common Gate 1 failures.
+  // Must be false / omitted for plain-text calls (e.g. the rolling summary).
+  expectJson:  z.boolean().default(false),
 });
-
-// ─── Groq model for suggestion generation ────────────────────────────────────
-// CLAUDE.md §2: "Groq OSS 120B" — use the Groq-hosted llama3 70b as proxy
-// Update to compound-beta or llama-3.3-70b-versatile per your Groq account access
-
-const GROQ_MODEL = 'llama-3.3-70b-versatile';
-const GROQ_API_BASE = 'https://api.groq.com/openai/v1';
 
 // ─── Handler ─────────────────────────────────────────────────────────────────
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
-  // Parse + validate request body
+  // 1. Parse + validate request body
   let body: unknown;
   try {
     body = await req.json();
@@ -50,34 +52,42 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     );
   }
 
-  const { systemPrompt, userPrompt, groqApiKey: clientKey, maxTokens } = parsed.data;
+  const { systemPrompt, userPrompt, groqApiKey: clientKey, maxTokens, expectJson } = parsed.data;
 
-  // Server-side key takes precedence; client key is fallback for dev/settings override
+  // 2. Resolve API key — server env takes precedence over client-supplied override
   const apiKey = process.env.GROQ_API_KEY ?? clientKey;
   if (!apiKey) {
     return NextResponse.json(
-      { error: 'No Groq API key configured. Set GROQ_API_KEY in .env.local or provide it in Settings.' },
+      {
+        error:
+          'No Groq API key configured. Set GROQ_API_KEY in .env.local or provide it in Settings.',
+      },
       { status: 500 },
     );
   }
 
-  // Forward to Groq
+  // 3. Forward to Groq
   let groqResponse: Response;
   try {
     groqResponse = await fetch(`${GROQ_API_BASE}/chat/completions`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey}`,
+        Authorization:  `Bearer ${apiKey}`,
       },
       body: JSON.stringify({
-        model: GROQ_MODEL,
+        model:      GROQ_MODEL,
         max_tokens: maxTokens,
-        temperature: 0.3, // Low temperature: we want deterministic, structured JSON output
+        temperature: 0.3,
         messages: [
           { role: 'system', content: systemPrompt },
-          { role: 'user', content: userPrompt },
+          { role: 'user',   content: userPrompt   },
         ],
+        // Instructs Groq to output valid JSON with no markdown wrapping.
+        // Only applied when the caller explicitly opts in — plain-text calls
+        // (e.g. the rolling summary) must not set this or the model will
+        // JSON-encode its plain-text output.
+        ...(expectJson ? { response_format: { type: 'json_object' } } : {}),
       }),
     });
   } catch (err) {
@@ -87,21 +97,30 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     );
   }
 
+  // 4. Map Groq error codes to meaningful HTTP statuses for our clients.
+  //    Do NOT blindly forward Groq's status:
+  //      - 401/403 from Groq means OUR key is wrong/expired → our 500 (misconfiguration)
+  //      - 429 from Groq means rate-limited → propagate as 429 (client can back off)
+  //      - Any other 4xx/5xx from Groq → 502 (bad gateway; upstream failure)
   if (!groqResponse.ok) {
     const errText = await groqResponse.text().catch(() => 'unknown error');
+    const status  = mapGroqStatus(groqResponse.status);
     return NextResponse.json(
       { error: `Groq API error ${groqResponse.status}: ${errText}` },
-      { status: groqResponse.status },
+      { status },
     );
   }
 
-  // Parse Groq response and return only the content string.
-  // Validation of what's IN the content string happens in suggestionService — not here.
+  // 5. Parse Groq response — extract only the content string.
+  //    Validation of what's IN the string is the service layer's responsibility.
   let groqData: unknown;
   try {
     groqData = await groqResponse.json();
   } catch {
-    return NextResponse.json({ error: 'Failed to parse Groq response JSON' }, { status: 502 });
+    return NextResponse.json(
+      { error: 'Failed to parse Groq response JSON' },
+      { status: 502 },
+    );
   }
 
   const content = extractContent(groqData);
@@ -117,26 +136,33 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
+/**
+ * Maps Groq upstream HTTP status codes to appropriate codes for our API clients.
+ *
+ * 401 / 403 — bad or revoked API key; this is our server misconfiguration → 500
+ * 429       — rate limited; propagate so the client can implement back-off → 429
+ * everything else (422, 5xx, …) → 502 Bad Gateway
+ */
+function mapGroqStatus(groqStatus: number): number {
+  if (groqStatus === 429) return 429;
+  if (groqStatus === 401 || groqStatus === 403) return 500;
+  return 502;
+}
+
+/**
+ * Drills into the standard OpenAI-compatible response shape to extract the
+ * assistant message content string.
+ *
+ * Uses optional chaining instead of manual `'key' in obj` guards — shorter,
+ * harder to misread, and no less type-safe given the `unknown` input type.
+ */
 function extractContent(data: unknown): string | null {
-  if (
-    data !== null &&
-    typeof data === 'object' &&
-    'choices' in data &&
-    Array.isArray((data as Record<string, unknown>).choices) &&
-    (data as Record<string, unknown[]>).choices.length > 0
-  ) {
-    const first = (data as Record<string, unknown[]>).choices[0];
-    if (
-      first !== null &&
-      typeof first === 'object' &&
-      'message' in (first as object) &&
-      typeof ((first as Record<string, unknown>).message) === 'object'
-    ) {
-      const message = (first as Record<string, Record<string, unknown>>).message;
-      if (typeof message.content === 'string') {
-        return message.content;
-      }
-    }
-  }
-  return null;
+  const content = (
+    data as
+      | { choices?: Array<{ message?: { content?: unknown } }> }
+      | null
+      | undefined
+  )?.choices?.[0]?.message?.content;
+
+  return typeof content === 'string' && content.length > 0 ? content : null;
 }
